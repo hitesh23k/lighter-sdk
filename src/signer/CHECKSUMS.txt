@@ -1,0 +1,5 @@
+# SHA-256 checksums of the vendored Lighter signer artifacts.
+# Regenerate with scripts/build-wasm.sh; verify with `npm run checksum`.
+# Source: github.com/elliottech/lighter-go (wasm/ package), Apache-2.0. See NOTICE.
+e96a236e08e4990e5a826a317cae1a1872ddbffcd12a6ad549f22e304d1aae1b  lighterSigner.wasm
+0c949f4996f9a89698e4b5c586de32249c3b69b7baadb64d220073cc04acba14  wasm_exec.js

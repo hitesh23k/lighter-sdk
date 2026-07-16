@@ -1,0 +1,69 @@
+{
+  "name": "@hitesh23k/lighter-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript/JavaScript SDK for Lighter (zkLighter) and Robinhood-Chain Lighter — WASM-backed zk signer, REST and WebSocket clients.",
+  "license": "Apache-2.0",
+  "author": "hitesh23k",
+  "type": "commonjs",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "browser": "./dist/index.browser.mjs",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/index.browser.mjs",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./browser": {
+      "types": "./dist/index.browser.d.ts",
+      "import": "./dist/index.browser.mjs",
+      "default": "./dist/index.browser.mjs"
+    },
+    "./lighterSigner.wasm": "./dist/lighterSigner.wasm",
+    "./wasm_exec.js": "./dist/wasm_exec.js"
+  },
+  "files": [
+    "dist",
+    "NOTICE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup && node scripts/copy-wasm.mjs",
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "checksum": "node scripts/verify-checksums.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run checksum && npm run typecheck && npm run build && npm test"
+  },
+  "keywords": [
+    "lighter",
+    "zklighter",
+    "perp",
+    "perpetuals",
+    "dex",
+    "trading",
+    "sdk",
+    "wasm",
+    "signer",
+    "robinhood"
+  ],
+  "optionalDependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "tsup": "^8.3.5",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.8"
+  }
+}

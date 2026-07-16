@@ -1,0 +1,18 @@
+@hitesh23k/lighter-sdk
+Copyright 2026 hitesh23k
+
+This product includes software developed by third parties, redistributed under
+their respective licenses:
+
+1. Lighter Go signer (compiled to WebAssembly: dist/lighterSigner.wasm)
+   Source: github.com/elliottech/lighter-go (the `wasm/` package)
+   License: Apache License 2.0
+   The .wasm artifact in this package is an unmodified compilation of the
+   upstream Go source to the GOOS=js GOARCH=wasm target. See scripts/build-wasm.sh
+   for the reproducible build procedure and the pinned upstream reference.
+
+2. Go WebAssembly runtime glue (dist/wasm_exec.js)
+   Source: The Go Project (golang.org) — misc/wasm/wasm_exec.js
+   Copyright 2018 The Go Authors. All rights reserved.
+   License: BSD-3-Clause
+   Vendored unmodified from the Go toolchain distribution.

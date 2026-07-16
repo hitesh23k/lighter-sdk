@@ -6,6 +6,7 @@ import LighterWs from "./ws/client";
 import { createAuthToken } from "./signer/core";
 import {
     LighterRestClientConfig,
+    LighterVenue,
     LighterSignerContext,
     LighterOrderBookDetail,
     LighterSendTxResponse,
@@ -100,7 +101,7 @@ export interface PlaceLimitOrderParams {
  */
 export default class LighterClient {
     public readonly rest: LighterRestClient;
-    private readonly venue: string;
+    private readonly venue: LighterVenue;
     private readonly isMainnet: boolean;
     private readonly defaultSigner?: LighterSignerContext;
     private readonly defaultSlippage: number;

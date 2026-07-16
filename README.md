@@ -18,6 +18,9 @@ npm install @hitesh23k/lighter-sdk
 
 Requires Node >= 18 (uses global `fetch` and WebAssembly).
 
+> **TypeScript on `nodenext`:** install `@types/node` and add `"types": ["node"]` to your `tsconfig.json`
+> so Node globals (`process`, etc.) resolve. The SDK's own types work out of the box.
+
 ## Quick start (high-level client)
 
 `LighterClient` resolves markets by symbol and scales human sizes/prices to Lighter's integer encoding for
@@ -46,6 +49,37 @@ client.streamOrderBook("BTC", (msg) => console.log(msg.type, msg));
 
 Everything low-level is still reachable via `client.rest` and `client.ws`. The sections below document
 those directly.
+
+## Trading setup (onboarding)
+
+To trade you need a **signer**: `{ apiPrivateKey, accountIndex, apiKeyIndex }`. Getting one is a one-time
+setup per wallet:
+
+1. **Create an account** by depositing to Lighter via its L1 bridge (on-chain; not done by this SDK). Your
+   `accountIndex` is then discoverable from your wallet address.
+2. **Associate an API key** — the SDK generates a key, L2-signs a ChangePubKey, your wallet approves it with
+   one `personal_sign`, and it's submitted. `LighterOnboarding` does this end to end:
+
+```ts
+import { LighterOnboarding, LighterClient } from "@hitesh23k/lighter-sdk";
+// your EVM wallet (ethers/viem/etc.) — only used to personal_sign one message
+// e.g. ethers: const wallet = new ethers.Wallet(privateKey)
+
+const onboarding = new LighterOnboarding({ venue: "zk", isMainnet: true });
+
+const { signer, apiPrivateKey } = await onboarding.registerApiKey({
+  l1Address: wallet.address,                    // resolves your accountIndex
+  l1Sign: (message) => wallet.signMessage(message), // wallet approves the key
+});
+// STORE apiPrivateKey securely — it is your trading credential and cannot be recovered.
+
+const client = new LighterClient({ venue: "zk", isMainnet: true, signer });
+await client.placeMarketOrder({ symbol: "BTC", side: "long", size: 0.001 });
+```
+
+Prefer to split signing across a backend/frontend? Use the two-step form: `prepareApiKey()` returns a
+`messageToSign` (have the wallet sign it wherever it lives), then `submitApiKey(pending, l1Signature)`.
+Find your accounts anytime with `onboarding.getAccounts(l1Address)` (or `client.rest.getAccountsByL1Address`).
 
 ## Signer usage
 

@@ -45,6 +45,10 @@ export type {
     PlaceLimitOrderParams,
 } from "./client";
 
+// Onboarding (associate an API key with an account so you can trade)
+export { default as LighterOnboarding } from "./onboarding";
+export type { LighterOnboardingConfig, PendingApiKeyRegistration } from "./onboarding";
+
 // REST client + protocol constants + fixed-point helpers
 export { default as LighterRestClient } from "./rest/client";
 export { default as LighterConstant } from "./constants";
@@ -65,6 +69,9 @@ export type {
 
 // API / config types
 export type {
+    LighterVenue,
+    LighterCandle,
+    LighterCandlesResponse,
     LighterRestClientConfig,
     LighterIntegratorConfig,
     LighterSignerContext,

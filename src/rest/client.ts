@@ -29,6 +29,7 @@ import {
     LighterTrade,
     LighterPositionFunding,
     LighterTokenListItem,
+    LighterCandlesResponse,
     LighterCreateMarketOrderParams,
     LighterCreateLimitOrderParams,
     LighterActiveOrder,
@@ -296,8 +297,8 @@ export default class LighterRestClient {
         end_timestamp: number;
         count_back: number;
         set_timestamp_to_end?: boolean;
-    }): Promise<any> {
-        return this.getJson<any>("getCandles", LighterConstant.ENDPOINTS.candles, params);
+    }): Promise<LighterCandlesResponse> {
+        return this.getJson<LighterCandlesResponse>("getCandles", LighterConstant.ENDPOINTS.candles, params);
     }
 
     /**
@@ -311,8 +312,8 @@ export default class LighterRestClient {
         end_timestamp: number;
         count_back: number;
         set_timestamp_to_end?: boolean;
-    }): Promise<any> {
-        return this.getJson<any>("getMarkPriceCandles", LighterConstant.ENDPOINTS.markPriceCandles, params);
+    }): Promise<LighterCandlesResponse> {
+        return this.getJson<LighterCandlesResponse>("getMarkPriceCandles", LighterConstant.ENDPOINTS.markPriceCandles, params);
     }
 
     /** Full order books (levels) for all markets, or one market when `marketId` is given. */

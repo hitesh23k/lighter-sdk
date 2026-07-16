@@ -12,15 +12,42 @@ export interface LighterIntegratorConfig {
     makerFee: number;
 }
 
+/** Supported perp venues: the zk-Lighter L2 (USDC) or the Robinhood-Chain Lighter deployment (USDG). */
+export type LighterVenue = "zk" | "robinhood";
+
 export interface LighterRestClientConfig {
     /** Default true (mainnet). */
     isMainnet?: boolean;
     /** Override the resolved host (rare); the signer chainId always comes from venue + network. */
     baseUrl?: string;
-    /** Perp venue selector (LighterConstant.VENUE): "zk" (default) or "robinhood". Picks host + signer chainId. */
-    venue?: string;
+    /** Perp venue: "zk" (default) or "robinhood". Picks host + signer chainId. */
+    venue?: LighterVenue;
     /** Optional builder-fee routing; omit to never attach an integrator fee. */
     integrator?: LighterIntegratorConfig | null;
+}
+
+/** One OHLCV candle from /candles or /markPriceCandles. `t` is the open time in epoch ms. */
+export interface LighterCandle {
+    /** Open time, epoch milliseconds. */
+    t: number;
+    o: number;
+    h: number;
+    l: number;
+    c: number;
+    /** Base-asset volume. */
+    v: number;
+    /** Quote-asset (USD) volume. */
+    V: number;
+    /** Internal candle index/id. */
+    i?: number;
+}
+
+export interface LighterCandlesResponse {
+    code?: number;
+    /** The resolution echoed back by the server. */
+    r?: string | number;
+    /** Candles, oldest first. */
+    c: LighterCandle[];
 }
 
 /** Auth context for signed (write) transactions. */

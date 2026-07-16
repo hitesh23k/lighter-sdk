@@ -21,8 +21,8 @@ export interface WebSocketLike {
 export type WebSocketCtor = new (url: string) => WebSocketLike;
 
 export interface LighterWsConfig {
-    /** Perp venue (LighterConstant.VENUE): "zk" (default) or "robinhood". Picks the stream host. */
-    venue?: string;
+    /** Perp venue: "zk" (default) or "robinhood". Picks the stream host. */
+    venue?: "zk" | "robinhood";
     /** Default true (mainnet). */
     isMainnet?: boolean;
     /** Full override of the wss URL (rare); otherwise derived from venue + network. */

@@ -25,7 +25,7 @@ export interface LighterClientContext {
 export interface LighterCreateOrderInput {
     marketIndex: number;
     clientOrderIndex: number;
-    /** Base amount as an integer scaled by the market's size_decimals (must fit int64/2^53). */
+    /** Base amount as an integer scaled by the market's size_decimals (uint48; must be 0..2^48-1). */
     baseAmount: bigint | number;
     /** Price as an integer scaled by the market's price_decimals (must fit uint32). 0 = unset. */
     price: number;
@@ -78,6 +78,9 @@ export interface LighterSignedTx {
     txHash?: string;
 }
 
+/** base_amount is a uint48 field in the order tx; the Go signer rejects anything larger. 2^48 - 1. */
+const MAX_BASE_AMOUNT = 281474976710655;
+
 type WasmFn = (...args: any[]) => any;
 export interface LighterWasmExports {
     GenerateAPIKey: WasmFn;
@@ -85,6 +88,7 @@ export interface LighterWasmExports {
     CreateAuthToken: WasmFn;
     SignCreateOrder: WasmFn;
     SignCancelOrder: WasmFn;
+    SignCancelAllOrders: WasmFn;
     SignModifyOrder: WasmFn;
     SignUpdateLeverage: WasmFn;
     SignChangePubKey: WasmFn;
@@ -122,6 +126,7 @@ export function finalizeExports(g: any): LighterWasmExports {
         CreateAuthToken: g.CreateAuthToken,
         SignCreateOrder: g.SignCreateOrder,
         SignCancelOrder: g.SignCancelOrder,
+        SignCancelAllOrders: g.SignCancelAllOrders,
         SignModifyOrder: g.SignModifyOrder,
         SignUpdateLeverage: g.SignUpdateLeverage,
         SignChangePubKey: g.SignChangePubKey,
@@ -174,6 +179,24 @@ function toSafeInt(value: bigint | number, field: string): number {
     return n;
 }
 
+/**
+ * Convert a scaled base amount to the number the WASM ABI expects, validating the uint48 field width the
+ * signer enforces. Passing a string or BigInt to the WASM panics it, and a value above 2^48-1 is rejected
+ * with an opaque error — so we surface a clear, actionable message here instead.
+ */
+function toBaseAmountArg(value: bigint | number): number {
+    if (typeof value === "bigint") {
+        if (value < 0n || value > BigInt(MAX_BASE_AMOUNT)) {
+            throw new Error(`LighterSigner::baseAmount out of range: ${value} (must be 0..${MAX_BASE_AMOUNT}, uint48)`);
+        }
+        return Number(value);
+    }
+    if (!Number.isInteger(value) || value < 0 || value > MAX_BASE_AMOUNT) {
+        throw new Error(`LighterSigner::baseAmount out of range: ${value} (must be an integer 0..${MAX_BASE_AMOUNT}, uint48)`);
+    }
+    return value;
+}
+
 export async function signCreateOrder(ctx: LighterClientContext, input: LighterCreateOrderInput): Promise<LighterSignedTx> {
     const exports = await ensureSignerLoaded();
     ensureClient(exports, ctx);
@@ -186,7 +209,7 @@ export async function signCreateOrder(ctx: LighterClientContext, input: LighterC
     const result = exports.SignCreateOrder(
         input.marketIndex,
         input.clientOrderIndex,
-        toSafeInt(input.baseAmount, "baseAmount"),
+        toBaseAmountArg(input.baseAmount),
         input.price,
         input.isAsk ? 1 : 0,
         input.orderType,
@@ -340,7 +363,7 @@ export async function signModifyOrder(ctx: LighterClientContext, input: LighterM
     const result = exports.SignModifyOrder(
         input.marketIndex,
         input.orderIndex,
-        toSafeInt(input.baseAmount, "baseAmount"),
+        toBaseAmountArg(input.baseAmount),
         input.price,
         input.triggerPrice ?? 0,
         0, // integratorAccountIndex (Nil)
@@ -399,4 +422,36 @@ export async function signCancelOrder(ctx: LighterClientContext, input: LighterC
         ctx.accountIndex,
     );
     return toSignedTx(result, "signCancelOrder");
+}
+
+export interface LighterCancelAllOrdersInput {
+    /** 0 = immediate, 1 = scheduled (at `time`), 2 = abort a scheduled cancel. Default immediate. */
+    timeInForce?: number;
+    /** Epoch-ms trigger for a scheduled cancel (timeInForce 1); 0/omitted for immediate. */
+    time?: number;
+    /** Market index to cancel, or 255 for ALL markets (the signer rejects other out-of-range values). */
+    marketIndex: number;
+    nonce: number;
+}
+
+/**
+ * Sign an atomic CancelAllOrders tx (tx_type 16) — cancels every resting order (marketIndex 255) or all
+ * orders in one market, in a single transaction. Preferred over cancelling order-by-order: one nonce, one
+ * round trip, and no window for fills between per-order cancels.
+ */
+export async function signCancelAllOrders(ctx: LighterClientContext, input: LighterCancelAllOrdersInput): Promise<LighterSignedTx> {
+    const exports = await ensureSignerLoaded();
+    ensureClient(exports, ctx);
+    Logger.debug(`LighterSigner::signCancelAllOrders::account=${ctx.accountIndex}, market=${input.marketIndex}, tif=${input.timeInForce ?? 0}`);
+    // Positional ABI (7 args): timeInForce, time, cancelAllMarketIndex, skipNonce, nonce, apiKeyIndex, accountIndex.
+    const result = exports.SignCancelAllOrders(
+        input.timeInForce ?? 0,
+        toSafeInt(input.time ?? 0, "time"),
+        input.marketIndex,
+        0, // skipNonce
+        input.nonce,
+        ctx.apiKeyIndex,
+        ctx.accountIndex,
+    );
+    return toSignedTx(result, "signCancelAllOrders");
 }

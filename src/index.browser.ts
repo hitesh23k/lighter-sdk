@@ -13,6 +13,7 @@ export { initLighterSigner, type BrowserSignerInit } from "./signer/browser";
 export {
     signCreateOrder,
     signCancelOrder,
+    signCancelAllOrders,
     signModifyOrder,
     signUpdateLeverage,
     signChangePubKey,
@@ -22,6 +23,7 @@ export {
     type LighterClientContext,
     type LighterCreateOrderInput,
     type LighterCancelOrderInput,
+    type LighterCancelAllOrdersInput,
     type LighterModifyOrderInput,
     type LighterUpdateLeverageInput,
     type LighterSignedTx,

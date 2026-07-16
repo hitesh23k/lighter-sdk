@@ -137,6 +137,19 @@ export default class LighterConstant {
     /** client_order_index is a uint48 in the order tx; must stay below 2^48. */
     public static readonly MAX_CLIENT_ORDER_INDEX = 281474976710655;
 
+    /** base_amount is a uint48 in the order tx (the WASM signer rejects larger values). 2^48 - 1. */
+    public static readonly MAX_BASE_AMOUNT = 281474976710655;
+
+    /** SignCancelAllOrders market index sentinel: 255 = cancel across all markets (verified against the signer). */
+    public static readonly CANCEL_ALL_MARKETS = 255;
+
+    /** SignCancelAllOrders time-in-force: 0 = immediate, 1 = scheduled (at `time`), 2 = abort a scheduled cancel. */
+    public static readonly CANCEL_ALL_TIME_IN_FORCE = {
+        IMMEDIATE: 0,
+        SCHEDULED: 1,
+        ABORT: 2,
+    } as const;
+
     /**
      * Initial-margin-fraction scale: an integer `fraction` maps to margin% = fraction/100, so
      * leverage = 10000 / fraction (e.g. 500 → 5.00% → 20x). 1x = 10000 (the upper bound).

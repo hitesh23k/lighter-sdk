@@ -4,6 +4,7 @@ import path from "node:path";
 import {
     signCreateOrder,
     signCancelOrder,
+    signCancelAllOrders,
     signModifyOrder,
     signUpdateLeverage,
     signApproveIntegrator,
@@ -114,12 +115,12 @@ describe.runIf(artifactsPresent)("LighterSigner (WASM)", () => {
         ).rejects.toThrow(/OrderExpiry is invalid/);
     });
 
-    it("rejects a baseAmount past the safe-integer range before hitting the ABI", async () => {
+    it("rejects a baseAmount past the uint48 field width with a clear error (before the WASM's opaque one)", async () => {
         await expect(
             signCreateOrder(ctx, {
                 marketIndex: 1,
                 clientOrderIndex: 1,
-                baseAmount: 2n ** 60n,
+                baseAmount: 2n ** 60n, // > 2^48-1
                 price: 617104,
                 isAsk: false,
                 orderType: 1,
@@ -128,6 +129,28 @@ describe.runIf(artifactsPresent)("LighterSigner (WASM)", () => {
                 orderExpiry: 0,
                 nonce: 0,
             }),
-        ).rejects.toThrow(/exceeds safe integer range/);
+        ).rejects.toThrow(/baseAmount out of range/);
+    });
+
+    it("accepts baseAmount exactly at the uint48 max", async () => {
+        const signed = await signCreateOrder(ctx, {
+            marketIndex: 1,
+            clientOrderIndex: 1,
+            baseAmount: 281474976710655n, // 2^48 - 1
+            price: 617104,
+            isAsk: false,
+            orderType: 0, // LIMIT (avoids IOC-specific validation)
+            timeInForce: 1,
+            reduceOnly: false,
+            orderExpiry: -1,
+            nonce: 0,
+        });
+        expect(signed.txType).toBe(14);
+    });
+
+    it("produces an atomic cancel-all-orders tx (txType 16) for all markets", async () => {
+        const signed = await signCancelAllOrders(ctx, { marketIndex: 255, nonce: 0 });
+        expect(signed.txType).toBe(16);
+        expect(JSON.parse(signed.txInfo).Sig).toBeTruthy();
     });
 });

@@ -6,12 +6,14 @@ import LighterHelper from "../helpers";
 import {
     signCreateOrder,
     signCancelOrder,
+    signCancelAllOrders,
     signModifyOrder,
     signUpdateLeverage,
     signApproveIntegrator,
     createAuthToken,
     type LighterClientContext,
 } from "../signer/core";
+import NonceManager from "./nonce-manager";
 import {
     LighterRestClientConfig,
     LighterIntegratorConfig,
@@ -49,6 +51,8 @@ export default class LighterRestClient {
     /** Cached auth tokens per account+key; refreshed before expiry. */
     private authTokenCache: Map<string, { token: string; expiresAtMs: number }> = new Map();
     private static readonly AUTH_TOKEN_TTL_MS = 6 * 60 * 60 * 1000; // refresh well before the ~7h server deadline
+    /** Serializes signed writes per account+key and sequences their nonces (see NonceManager). */
+    private readonly nonces: NonceManager;
 
     constructor(config: LighterRestClientConfig = {}) {
         const venue = config.venue || LighterConstant.VENUE.ZK;
@@ -60,6 +64,7 @@ export default class LighterRestClient {
         this.venue = venue;
         this.isMainnet = isMainnet;
         this.integrator = config.integrator || null;
+        this.nonces = new NonceManager((accountIndex, apiKeyIndex) => this.getNextNonce(accountIndex, apiKeyIndex));
     }
 
     private clientContext(ctx: LighterSignerContext): LighterClientContext {
@@ -102,12 +107,25 @@ export default class LighterRestClient {
         return res.tokens || [];
     }
 
-    public async getFundingRates(): Promise<LighterFundingRate[]> {
+    /**
+     * Funding rates. The `/funding-rates` endpoint AGGREGATES several venues (binance, bybit, hyperliquid,
+     * lighter), so this defaults to Lighter's own rows only — otherwise a naive `find(symbol)` can return
+     * another exchange's rate. Pass `{ exchange: null }` for the raw aggregated set, or another venue name.
+     */
+    public async getFundingRates(options: { exchange?: string | null } = {}): Promise<LighterFundingRate[]> {
         const res = await this.getJson<LighterFundingRatesResponse>(
             "getFundingRates",
             LighterConstant.ENDPOINTS.fundingRates,
         );
-        return res.funding_rates || [];
+        const rows = res.funding_rates || [];
+        const exchange = options.exchange === undefined ? LighterConstant.NETWORK : options.exchange;
+        if (exchange === null) return rows;
+        return rows.filter((r) => String(r.exchange || "").toLowerCase() === String(exchange).toLowerCase());
+    }
+
+    /** Raw aggregated funding rates across ALL venues (binance/bybit/hyperliquid/lighter). */
+    public async getAllFundingRates(): Promise<LighterFundingRate[]> {
+        return this.getFundingRates({ exchange: null });
     }
 
     public async getAccount(accountIndex: number): Promise<LighterAccount | null> {
@@ -282,6 +300,68 @@ export default class LighterRestClient {
         return this.getJson<any>("getCandles", LighterConstant.ENDPOINTS.candles, params);
     }
 
+    /**
+     * Mark-price OHLCV candles. Mark price (not last trade) drives margin and liquidation, so use these for
+     * risk math. Same required params as {@link getCandles}.
+     */
+    public async getMarkPriceCandles(params: {
+        market_id: number;
+        resolution: string;
+        start_timestamp: number;
+        end_timestamp: number;
+        count_back: number;
+        set_timestamp_to_end?: boolean;
+    }): Promise<any> {
+        return this.getJson<any>("getMarkPriceCandles", LighterConstant.ENDPOINTS.markPriceCandles, params);
+    }
+
+    /** Full order books (levels) for all markets, or one market when `marketId` is given. */
+    public async getOrderBooks(marketId?: number): Promise<any> {
+        return this.getJson<any>(
+            "getOrderBooks",
+            LighterConstant.ENDPOINTS.orderBooks,
+            marketId !== undefined ? { market_id: marketId } : undefined,
+        );
+    }
+
+    /** Public recent trades for a market (no auth). */
+    public async getRecentTrades(marketId: number, limit = 100): Promise<LighterTrade[]> {
+        const res = await this.getJson<{ code?: number; trades?: LighterTrade[] }>(
+            "getRecentTrades",
+            LighterConstant.ENDPOINTS.recentTrades,
+            { market_id: marketId, limit },
+        );
+        return res.trades || [];
+    }
+
+    /** Account tier + trading limits (rate/volume/size caps). Requires auth (account-scoped). */
+    public async getAccountLimits(ctx: LighterSignerContext): Promise<any> {
+        const token = await this.authToken(ctx);
+        return this.getJsonAuthed<any>("getAccountLimits", LighterConstant.ENDPOINTS.accountLimits, token, {
+            account_index: ctx.accountIndex,
+        });
+    }
+
+    /**
+     * Closed / historical (inactive) orders for an account — needed for reconciliation. Requires auth.
+     * `marketId` defaults to all markets.
+     */
+    public async getInactiveOrders(
+        ctx: LighterSignerContext,
+        params: { marketId?: number; limit?: number } = {},
+    ): Promise<LighterActiveOrder[]> {
+        const token = await this.authToken(ctx);
+        const query: Record<string, unknown> = { account_index: ctx.accountIndex, limit: params.limit ?? 100 };
+        if (params.marketId !== undefined) query.market_id = params.marketId;
+        const res = await this.getJsonAuthed<{ code?: number; orders?: LighterActiveOrder[] }>(
+            "getInactiveOrders",
+            LighterConstant.ENDPOINTS.accountInactiveOrders,
+            token,
+            query,
+        );
+        return res.orders || [];
+    }
+
     public async getNextNonce(accountIndex: number, apiKeyIndex: number): Promise<number> {
         const res = await this.getJson<LighterNextNonceResponse>(
             "getNextNonce",
@@ -314,21 +394,30 @@ export default class LighterRestClient {
         ctx: LighterSignerContext,
         params: LighterCreateMarketOrderParams,
     ): Promise<LighterSendTxResponse> {
-        const nonce = await this.getNextNonce(ctx.accountIndex, ctx.apiKeyIndex);
-        const signed = await signCreateOrder(this.clientContext(ctx), {
-            marketIndex: params.marketIndex,
-            clientOrderIndex: params.clientOrderIndex,
-            baseAmount: params.baseAmount,
-            price: params.price !== undefined ? Number(params.price) : 0,
-            isAsk: params.isAsk,
-            orderType: LighterConstant.ORDER_TYPE.MARKET,
-            timeInForce: LighterConstant.TIME_IN_FORCE.IMMEDIATE_OR_CANCEL,
-            reduceOnly: params.reduceOnly,
-            orderExpiry: 0, // IOC/market orders require NilOrderExpiry (0)
-            ...this.integratorInput(params.applyIntegratorFee),
-            nonce,
+        // A Lighter market order is an IOC limit that fills up to a worst-case price bound. price 0 means a
+        // buy can never fill (limit 0) and a sell has NO slippage protection — so a bound is required.
+        const price = params.price !== undefined ? Number(params.price) : 0;
+        if (!Number.isFinite(price) || price <= 0) {
+            throw new Error(
+                "LighterRestClient::createMarketOrder::a positive worst-case price bound is required (integer scaled by price_decimals); use the high-level client's slippage, or pass params.price",
+            );
+        }
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signCreateOrder(this.clientContext(ctx), {
+                marketIndex: params.marketIndex,
+                clientOrderIndex: params.clientOrderIndex,
+                baseAmount: params.baseAmount,
+                price,
+                isAsk: params.isAsk,
+                orderType: LighterConstant.ORDER_TYPE.MARKET,
+                timeInForce: LighterConstant.TIME_IN_FORCE.IMMEDIATE_OR_CANCEL,
+                reduceOnly: params.reduceOnly,
+                orderExpiry: 0, // IOC/market orders require NilOrderExpiry (0)
+                ...this.integratorInput(params.applyIntegratorFee),
+                nonce,
+            });
+            return this.sendTx("createMarketOrder", signed.txType, signed.txInfo);
         });
-        return this.sendTx("createMarketOrder", signed.txType, signed.txInfo);
     }
 
     /**
@@ -340,7 +429,6 @@ export default class LighterRestClient {
         ctx: LighterSignerContext,
         params: LighterCreateLimitOrderParams,
     ): Promise<LighterSendTxResponse> {
-        const nonce = await this.getNextNonce(ctx.accountIndex, ctx.apiKeyIndex);
         const isIoc = params.timeInForce === "ioc";
         const isPostOnly = params.postOnly === true || params.timeInForce === "alo";
         const timeInForce = isIoc
@@ -348,20 +436,22 @@ export default class LighterRestClient {
             : isPostOnly
                 ? LighterConstant.TIME_IN_FORCE.POST_ONLY
                 : LighterConstant.TIME_IN_FORCE.GOOD_TILL_TIME;
-        const signed = await signCreateOrder(this.clientContext(ctx), {
-            marketIndex: params.marketIndex,
-            clientOrderIndex: params.clientOrderIndex,
-            baseAmount: params.baseAmount,
-            price: Number(params.price),
-            isAsk: params.isAsk,
-            orderType: LighterConstant.ORDER_TYPE.LIMIT,
-            timeInForce,
-            reduceOnly: Boolean(params.reduceOnly),
-            orderExpiry: isIoc ? 0 : -1, // IOC uses NilOrderExpiry; resting orders get the signer's 28d max
-            ...this.integratorInput(params.applyIntegratorFee),
-            nonce,
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signCreateOrder(this.clientContext(ctx), {
+                marketIndex: params.marketIndex,
+                clientOrderIndex: params.clientOrderIndex,
+                baseAmount: params.baseAmount,
+                price: Number(params.price),
+                isAsk: params.isAsk,
+                orderType: LighterConstant.ORDER_TYPE.LIMIT,
+                timeInForce,
+                reduceOnly: Boolean(params.reduceOnly),
+                orderExpiry: isIoc ? 0 : -1, // IOC uses NilOrderExpiry; resting orders get the signer's 28d max
+                ...this.integratorInput(params.applyIntegratorFee),
+                nonce,
+            });
+            return this.sendTx("createLimitOrder", signed.txType, signed.txInfo);
         });
-        return this.sendTx("createLimitOrder", signed.txType, signed.txInfo);
     }
 
     /**
@@ -386,22 +476,23 @@ export default class LighterRestClient {
             applyIntegratorFee?: boolean;
         },
     ): Promise<LighterSendTxResponse> {
-        const nonce = await this.getNextNonce(ctx.accountIndex, ctx.apiKeyIndex);
-        const signed = await signCreateOrder(this.clientContext(ctx), {
-            marketIndex: params.marketIndex,
-            clientOrderIndex: params.clientOrderIndex,
-            baseAmount: params.baseAmount,
-            price: params.price,
-            isAsk: params.isAsk,
-            orderType: params.orderType,
-            timeInForce: LighterConstant.TIME_IN_FORCE.IMMEDIATE_OR_CANCEL,
-            reduceOnly: true,
-            triggerPrice: params.triggerPrice,
-            orderExpiry: -1, // trigger orders require a non-nil expiry; -1 → signer sets 28 days (max)
-            ...this.integratorInput(params.applyIntegratorFee),
-            nonce,
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signCreateOrder(this.clientContext(ctx), {
+                marketIndex: params.marketIndex,
+                clientOrderIndex: params.clientOrderIndex,
+                baseAmount: params.baseAmount,
+                price: params.price,
+                isAsk: params.isAsk,
+                orderType: params.orderType,
+                timeInForce: LighterConstant.TIME_IN_FORCE.IMMEDIATE_OR_CANCEL,
+                reduceOnly: true,
+                triggerPrice: params.triggerPrice,
+                orderExpiry: -1, // trigger orders require a non-nil expiry; -1 → signer sets 28 days (max)
+                ...this.integratorInput(params.applyIntegratorFee),
+                nonce,
+            });
+            return this.sendTx("createTriggerOrder", signed.txType, signed.txInfo);
         });
-        return this.sendTx("createTriggerOrder", signed.txType, signed.txInfo);
     }
 
     /** Set per-market leverage. `leverage` is converted to Lighter's margin fraction (clamped by min). */
@@ -409,28 +500,50 @@ export default class LighterRestClient {
         ctx: LighterSignerContext,
         params: { marketIndex: number; leverage: number; marginMode?: number; minFraction?: number },
     ): Promise<LighterSendTxResponse> {
-        const nonce = await this.getNextNonce(ctx.accountIndex, ctx.apiKeyIndex);
         const fraction = LighterHelper.leverageToMarginFraction(params.leverage, params.minFraction);
-        const signed = await signUpdateLeverage(this.clientContext(ctx), {
-            marketIndex: params.marketIndex,
-            fraction,
-            marginMode: params.marginMode ?? LighterConstant.MARGIN_MODE.CROSS,
-            nonce,
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signUpdateLeverage(this.clientContext(ctx), {
+                marketIndex: params.marketIndex,
+                fraction,
+                marginMode: params.marginMode ?? LighterConstant.MARGIN_MODE.CROSS,
+                nonce,
+            });
+            return this.sendTx("updateLeverage", signed.txType, signed.txInfo);
         });
-        return this.sendTx("updateLeverage", signed.txType, signed.txInfo);
     }
 
     public async cancelOrder(
         ctx: LighterSignerContext,
         params: { marketIndex: number; orderIndex: number },
     ): Promise<LighterSendTxResponse> {
-        const nonce = await this.getNextNonce(ctx.accountIndex, ctx.apiKeyIndex);
-        const signed = await signCancelOrder(this.clientContext(ctx), {
-            marketIndex: params.marketIndex,
-            orderIndex: params.orderIndex,
-            nonce,
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signCancelOrder(this.clientContext(ctx), {
+                marketIndex: params.marketIndex,
+                orderIndex: params.orderIndex,
+                nonce,
+            });
+            return this.sendTx("cancelOrder", signed.txType, signed.txInfo);
         });
-        return this.sendTx("cancelOrder", signed.txType, signed.txInfo);
+    }
+
+    /**
+     * Atomically cancel every resting order (marketIndex 255 = all markets, the default) or all orders in a
+     * single market, in ONE tx (tx_type 16). Preferred over cancelling order-by-order — one nonce, one round
+     * trip, no window for fills between per-order cancels.
+     */
+    public async cancelAllOrders(
+        ctx: LighterSignerContext,
+        params: { marketIndex?: number; timeInForce?: number; time?: number } = {},
+    ): Promise<LighterSendTxResponse> {
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signCancelAllOrders(this.clientContext(ctx), {
+                marketIndex: params.marketIndex ?? LighterConstant.CANCEL_ALL_MARKETS,
+                timeInForce: params.timeInForce,
+                time: params.time,
+                nonce,
+            });
+            return this.sendTx("cancelAllOrders", signed.txType, signed.txInfo);
+        });
     }
 
     /** Modify a resting order's size/price/trigger. */
@@ -438,16 +551,17 @@ export default class LighterRestClient {
         ctx: LighterSignerContext,
         params: { marketIndex: number; orderIndex: number; baseAmount: bigint | number; price: number; triggerPrice?: number },
     ): Promise<LighterSendTxResponse> {
-        const nonce = await this.getNextNonce(ctx.accountIndex, ctx.apiKeyIndex);
-        const signed = await signModifyOrder(this.clientContext(ctx), {
-            marketIndex: params.marketIndex,
-            orderIndex: params.orderIndex,
-            baseAmount: params.baseAmount,
-            price: params.price,
-            triggerPrice: params.triggerPrice,
-            nonce,
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signModifyOrder(this.clientContext(ctx), {
+                marketIndex: params.marketIndex,
+                orderIndex: params.orderIndex,
+                baseAmount: params.baseAmount,
+                price: params.price,
+                triggerPrice: params.triggerPrice,
+                nonce,
+            });
+            return this.sendTx("modifyOrder", signed.txType, signed.txInfo);
         });
-        return this.sendTx("modifyOrder", signed.txType, signed.txInfo);
     }
 
     /**

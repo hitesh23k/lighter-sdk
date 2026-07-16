@@ -51,9 +51,13 @@ export default class LighterWs {
     private readonly reconnectMaxMs: number;
     private readonly wsCtorInject?: WebSocketCtor;
 
+    private readonly getAuthToken?: () => string | Promise<string>;
+
     private ws: WebSocketLike | null = null;
     private wsCtor: WebSocketCtor | null = null;
     private closedByUser = false;
+    /** True once a socket has opened at least once — gates auto-reconnect so a failed initial connect stays dead. */
+    private everConnected = false;
     private reconnectAttempts = 0;
     private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
     private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -80,6 +84,18 @@ export default class LighterWs {
         this.reconnectBaseMs = config.reconnectBaseMs ?? 1000;
         this.reconnectMaxMs = config.reconnectMaxMs ?? 30000;
         this.wsCtorInject = config.WebSocketImpl;
+        this.getAuthToken = config.getAuthToken;
+    }
+
+    /** Account-scoped channels whose subscribe frame must carry an `auth` token. */
+    private static needsAuth(channel: string): boolean {
+        return (
+            channel.startsWith("account_") ||
+            channel.startsWith("user_stats") ||
+            channel.startsWith("pool_") ||
+            channel.startsWith("notification") ||
+            channel === "rfq"
+        );
     }
 
     // ==================== lifecycle ====================
@@ -106,10 +122,11 @@ export default class LighterWs {
 
             socket.onopen = () => {
                 this.reconnectAttempts = 0;
+                this.everConnected = true;
                 Logger.debug(`LighterWs::open::${this.url}`);
                 this.startKeepAlive();
-                // (Re)subscribe every desired channel.
-                for (const channel of this.desiredChannels) this.sendSubscribe(channel);
+                // (Re)subscribe every desired channel (auth tokens are re-minted here for account channels).
+                for (const channel of this.desiredChannels) void this.sendSubscribe(channel);
                 this.emit("open", undefined);
                 if (!settled) {
                     settled = true;
@@ -134,7 +151,9 @@ export default class LighterWs {
                 this.stopKeepAlive();
                 this.ws = null;
                 this.emit("close", undefined);
-                if (!this.closedByUser && this.autoReconnect) this.scheduleReconnect();
+                // Only auto-reconnect a previously-established connection; a failed initial connect stays dead
+                // (the connect() promise already rejected — don't spin a hidden background loop).
+                if (this.everConnected && !this.closedByUser && this.autoReconnect) this.scheduleReconnect();
             };
         });
     }
@@ -218,6 +237,8 @@ export default class LighterWs {
             }
             return;
         }
+        // Our keepalive's pong reply is transport noise, not application data — don't surface it.
+        if (msg.type === "pong") return;
         this.emit("message", msg);
         if (msg.channel) {
             const handlers = this.channelHandlers.get(LighterWs.normalizeChannel(msg.channel));
@@ -225,8 +246,22 @@ export default class LighterWs {
         }
     }
 
-    private sendSubscribe(channel: string): void {
-        this.sendFrame({ type: "subscribe", channel });
+    private async sendSubscribe(channel: string): Promise<void> {
+        const frame: Record<string, unknown> = { type: "subscribe", channel };
+        if (LighterWs.needsAuth(channel)) {
+            if (!this.getAuthToken) {
+                // Should not happen — subscribe() rejects this up front — but guard the reconnect path too.
+                Logger.error(`LighterWs::cannot subscribe to authed channel "${channel}" without getAuthToken`);
+                return;
+            }
+            try {
+                frame.auth = await this.getAuthToken();
+            } catch (err: any) {
+                Logger.error(`LighterWs::getAuthToken failed for "${channel}": ${err?.message}`);
+                return;
+            }
+        }
+        this.sendFrame(frame);
     }
 
     private sendUnsubscribe(channel: string): void {
@@ -251,6 +286,11 @@ export default class LighterWs {
      * handle. Safe to call before `connect()`: the subscription is (re)sent on every connect.
      */
     public subscribe(channel: string, handler: LighterChannelHandler): Unsubscribe {
+        if (LighterWs.needsAuth(channel) && !this.getAuthToken) {
+            throw new Error(
+                `LighterWs::channel "${channel}" is account-scoped and requires auth — pass getAuthToken in the LighterWs config (or use LighterClient with a signer).`,
+            );
+        }
         const key = LighterWs.normalizeChannel(channel);
         this.desiredChannels.add(channel);
         let set = this.channelHandlers.get(key);
@@ -259,7 +299,7 @@ export default class LighterWs {
             this.channelHandlers.set(key, set);
         }
         set.add(handler);
-        this.sendSubscribe(channel);
+        void this.sendSubscribe(channel);
 
         return () => {
             const handlers = this.channelHandlers.get(key);

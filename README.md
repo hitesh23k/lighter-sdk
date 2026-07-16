@@ -144,6 +144,22 @@ const client = new LighterRestClient({ venue: "zk", isMainnet: true });
 You can also pass `wasmBytes` / `wasmExecSource` directly instead of URLs. The browser bundle imports no
 Node built-ins, so it bundles cleanly for the web.
 
+## Notes & limitations
+
+- **Concurrency-safe writes.** The REST client sequences nonces per account+api-key, so concurrent orders
+  (or place+cancel together) get distinct nonces — no silently-dropped transactions. Use one client
+  instance per account.
+- **Market orders always carry a worst-case price bound** (from `slippage`, else `defaultSlippage`, 5%),
+  computed off a freshly-refreshed price. The low-level `createMarketOrder` requires an explicit `price`.
+- **Funding rates default to Lighter's own rows.** `getFundingRates()` filters to `exchange === "lighter"`
+  because the endpoint aggregates several venues; use `getAllFundingRates()` for the raw set.
+- **Atomic cancel-all.** `cancelAllOrders()` sends a single tx (all markets by default) rather than looping.
+- **Account WebSocket channels are authenticated.** `subscribeAccountAll/Orders/Positions/Trades` need an
+  auth token; `LighterClient` mints it from your signer automatically, or pass `getAuthToken` to `LighterWs`.
+- **Edge/serverless runtimes.** Reads and WebSocket work anywhere (global `fetch`/`WebSocket`). Signing
+  ships a 14.4 MB WASM and needs Node (`fs`) or a browser (`initLighterSigner`); it does not run on
+  Cloudflare Workers / Vercel Edge, which forbid `fs`/`createRequire` and cap bundle size.
+
 ## Building the signer artifacts
 
 The compiled `lighterSigner.wasm` and Go's `wasm_exec.js` are vendored in `src/signer/`. To rebuild:

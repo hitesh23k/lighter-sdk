@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 vi.mock("../src/signer/core", () => ({
     signCreateOrder: vi.fn(async () => ({ txType: 14, txInfo: "{}" })),
     signCancelOrder: vi.fn(async () => ({ txType: 15, txInfo: "{}" })),
+    signCancelAllOrders: vi.fn(async () => ({ txType: 16, txInfo: "{}" })),
     signModifyOrder: vi.fn(async () => ({ txType: 17, txInfo: "{}" })),
     signUpdateLeverage: vi.fn(async () => ({ txType: 20, txInfo: "{}" })),
     signApproveIntegrator: vi.fn(async () => ({ txType: 45, txInfo: "{}", messageToSign: "L1-message" })),
@@ -16,7 +17,7 @@ vi.mock("../src/signer/core", () => ({
 
 import LighterRestClient from "../src/rest/client";
 import LighterConstant from "../src/constants";
-import { signCreateOrder, signUpdateLeverage, createAuthToken } from "../src/signer/core";
+import { signCreateOrder, signCancelAllOrders, signUpdateLeverage, createAuthToken } from "../src/signer/core";
 
 type FetchCall = { url: string; init?: any };
 let calls: FetchCall[];
@@ -109,6 +110,27 @@ describe("LighterRestClient reads", () => {
         mockFetch([{ match: "/funding-rates", body: null, text: "<html>502</html>" }]);
         const c = new LighterRestClient();
         await expect(c.getFundingRates()).rejects.toThrow(/non-JSON response/);
+    });
+
+    it("getFundingRates defaults to Lighter-only rows; getAllFundingRates returns every venue", async () => {
+        const rows = {
+            code: 200,
+            funding_rates: [
+                { symbol: "BTC", exchange: "binance", rate: 0.001 },
+                { symbol: "BTC", exchange: "lighter", rate: 0.002 },
+                { symbol: "ETH", exchange: "bybit", rate: 0.003 },
+            ],
+        };
+        mockFetch([{ match: "/funding-rates", body: rows }]);
+        const c = new LighterRestClient();
+        const lighter = await c.getFundingRates();
+        expect(lighter).toHaveLength(1);
+        expect(lighter[0].exchange).toBe("lighter");
+        expect(lighter[0].rate).toBe(0.002);
+
+        mockFetch([{ match: "/funding-rates", body: rows }]);
+        const all = await c.getAllFundingRates();
+        expect(all).toHaveLength(3);
     });
 });
 
@@ -237,5 +259,69 @@ describe("LighterRestClient integrator gating", () => {
         expect(out.messageToSign).toBe("L1-message");
         expect(out.nonce).toBe(8);
         expect(out.integratorAccountIndex).toBe(733818);
+    });
+});
+
+describe("LighterRestClient nonce sequencing (C2)", () => {
+    it("serializes concurrent writes into distinct increasing nonces, fetching nextNonce once", async () => {
+        const fetchMock = mockFetch([
+            { match: "/nextNonce", body: { nonce: 100 } },
+            { match: "/sendTx", body: { code: 200 } },
+        ]);
+        const c = new LighterRestClient();
+        // Fire three orders concurrently — the old code would read nonce 100 three times.
+        await Promise.all([
+            c.createLimitOrder(SIGNER, { marketIndex: 1, baseAmount: 10n, price: 5, isAsk: false, clientOrderIndex: 1 }),
+            c.createLimitOrder(SIGNER, { marketIndex: 1, baseAmount: 10n, price: 5, isAsk: false, clientOrderIndex: 2 }),
+            c.createLimitOrder(SIGNER, { marketIndex: 1, baseAmount: 10n, price: 5, isAsk: false, clientOrderIndex: 3 }),
+        ]);
+        const nonces = (signCreateOrder as any).mock.calls.map((c: any[]) => c[1].nonce).sort();
+        expect(nonces).toEqual([100, 101, 102]); // distinct, contiguous
+        const nonceFetches = fetchMock.mock.calls.filter((c: any[]) => String(c[0]).includes("/nextNonce")).length;
+        expect(nonceFetches).toBe(1); // fetched once, then advanced locally
+    });
+
+    it("resyncs from the server after a failed send (drops the local nonce)", async () => {
+        // First order fails at sendTx; the next must refetch nextNonce rather than reuse a stale local value.
+        let nextNonceValue = 200;
+        const fn = vi.fn(async (url: string, init?: any) => {
+            const u = String(url);
+            if (u.includes("/nextNonce")) return { ok: true, status: 200, text: async () => JSON.stringify({ nonce: nextNonceValue }) } as any;
+            // sendTx: fail the first, succeed after
+            const body = nextNonceValue === 200 ? { code: 500, message: "boom" } : { code: 200 };
+            return { ok: true, status: 200, text: async () => JSON.stringify(body) } as any;
+        });
+        vi.stubGlobal("fetch", fn);
+        const c = new LighterRestClient();
+        await expect(c.cancelOrder(SIGNER, { marketIndex: 1, orderIndex: 1 })).rejects.toThrow("boom");
+        nextNonceValue = 205; // server advanced / different
+        await c.cancelOrder(SIGNER, { marketIndex: 1, orderIndex: 2 });
+        const nonceFetches = fn.mock.calls.filter((c: any[]) => String(c[0]).includes("/nextNonce")).length;
+        expect(nonceFetches).toBe(2); // refetched after the failure instead of reusing 201
+    });
+});
+
+describe("LighterRestClient cancelAllOrders (H3) + market-order guard (H1)", () => {
+    it("cancelAllOrders signs one atomic tx (tx16) with the all-markets sentinel by default", async () => {
+        mockFetch([
+            { match: "/nextNonce", body: { nonce: 1 } },
+            { match: "/sendTx", body: { code: 200, tx_hash: "0xca" } },
+        ]);
+        const c = new LighterRestClient();
+        const res = await c.cancelAllOrders(SIGNER);
+        expect(res.tx_hash).toBe("0xca");
+        expect((signCancelAllOrders as any).mock.calls[0][1].marketIndex).toBe(LighterConstant.CANCEL_ALL_MARKETS);
+        const post = calls.find((x) => x.url.includes("/sendTx"));
+        expect(post?.init.body).toContain("tx_type=16");
+    });
+
+    it("createMarketOrder rejects a missing/zero price bound", async () => {
+        const c = new LighterRestClient();
+        await expect(
+            c.createMarketOrder(SIGNER, { marketIndex: 1, baseAmount: 10n, isAsk: false, reduceOnly: false, clientOrderIndex: 1 }),
+        ).rejects.toThrow(/positive worst-case price bound is required/);
+        await expect(
+            c.createMarketOrder(SIGNER, { marketIndex: 1, baseAmount: 10n, isAsk: false, reduceOnly: false, clientOrderIndex: 1, price: 0 }),
+        ).rejects.toThrow(/positive worst-case price bound is required/);
     });
 });

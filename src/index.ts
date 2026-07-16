@@ -11,6 +11,7 @@ export {
     // signing entrypoints
     signCreateOrder,
     signCancelOrder,
+    signCancelAllOrders,
     signModifyOrder,
     signUpdateLeverage,
     signChangePubKey,
@@ -23,6 +24,7 @@ export {
     type LighterClientContext,
     type LighterCreateOrderInput,
     type LighterCancelOrderInput,
+    type LighterCancelAllOrdersInput,
     type LighterModifyOrderInput,
     type LighterUpdateLeverageInput,
     type LighterSignedTx,

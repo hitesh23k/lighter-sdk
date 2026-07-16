@@ -1,6 +1,6 @@
 {
   "name": "@hitesh23k/lighter-sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript/JavaScript SDK for Lighter (zkLighter) and Robinhood-Chain Lighter — WASM-backed zk signer, REST and WebSocket clients.",
   "license": "Apache-2.0",
   "author": "hitesh23k",
@@ -8,11 +8,9 @@
   "main": "./dist/index.js",
   "module": "./dist/index.mjs",
   "types": "./dist/index.d.ts",
-  "browser": "./dist/index.browser.mjs",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "browser": "./dist/index.browser.mjs",
       "import": "./dist/index.mjs",
       "require": "./dist/index.js"
     },

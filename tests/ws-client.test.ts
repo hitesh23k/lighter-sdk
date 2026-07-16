@@ -131,9 +131,10 @@ describe("LighterWs subscribe/dispatch", () => {
 
     it("queues subscriptions made before connect and sends them on open", async () => {
         const ws = new LighterWs({ WebSocketImpl: FakeWebSocket as any });
-        ws.subscribeAccountAll(7, () => {}); // before connect
+        ws.subscribeTrades(3, () => {}); // public channel, before connect
         const inst = await connectFake(ws);
-        expect(inst.sentFrames()).toContainEqual({ type: "subscribe", channel: "account_all/7" });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inst.sentFrames()).toContainEqual({ type: "subscribe", channel: "trade/3" });
     });
 });
 
@@ -193,5 +194,60 @@ describe("LighterWs reconnect", () => {
         inst._serverClose();
         await vi.advanceTimersByTimeAsync(60000);
         expect(FakeWebSocket.instances.length).toBe(before);
+    });
+
+    it("does NOT reconnect after a FAILED initial connect (L3)", async () => {
+        const ws = new LighterWs({ WebSocketImpl: FakeWebSocket as any });
+        const p = ws.connect();
+        await vi.advanceTimersByTimeAsync(0);
+        const inst = FakeWebSocket.last();
+        // Simulate a connect failure: error then close, never opened.
+        inst.onerror?.({ message: "refused" });
+        inst.onclose?.({});
+        await expect(p).rejects.toThrow(/connect failed/);
+        const before = FakeWebSocket.instances.length;
+        await vi.advanceTimersByTimeAsync(60000);
+        expect(FakeWebSocket.instances.length).toBe(before); // no background reconnect loop
+    });
+});
+
+describe("LighterWs account-channel auth (C1)", () => {
+    it("throws when subscribing to an account channel without getAuthToken", async () => {
+        const ws = new LighterWs({ WebSocketImpl: FakeWebSocket as any });
+        await connectFake(ws);
+        expect(() => ws.subscribeAccountAll(7, () => {})).toThrow(/requires auth/);
+    });
+
+    it("includes an auth token in the subscribe frame for account channels", async () => {
+        const ws = new LighterWs({ WebSocketImpl: FakeWebSocket as any, getAuthToken: () => "tok-123" });
+        const inst = await connectFake(ws);
+        ws.subscribeAccountAll(7, () => {});
+        await vi.advanceTimersByTimeAsync(0); // let the async token resolve + frame send
+        expect(inst.sentFrames()).toContainEqual({ type: "subscribe", channel: "account_all/7", auth: "tok-123" });
+    });
+
+    it("public channels carry NO auth field", async () => {
+        const ws = new LighterWs({ WebSocketImpl: FakeWebSocket as any, getAuthToken: () => "tok-123" });
+        const inst = await connectFake(ws);
+        ws.subscribeOrderBook(1, () => {});
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inst.sentFrames()).toContainEqual({ type: "subscribe", channel: "order_book/1" });
+    });
+
+    it("re-mints the auth token on reconnect (token can expire)", async () => {
+        vi.spyOn(Math, "random").mockReturnValue(0);
+        let n = 0;
+        const ws = new LighterWs({ WebSocketImpl: FakeWebSocket as any, reconnectBaseMs: 10, getAuthToken: () => `tok-${n++}` });
+        const inst = await connectFake(ws);
+        ws.subscribeAccountAll(7, () => {});
+        await vi.advanceTimersByTimeAsync(0);
+        expect(inst.sentFrames()).toContainEqual({ type: "subscribe", channel: "account_all/7", auth: "tok-0" });
+        inst._serverClose();
+        await vi.advanceTimersByTimeAsync(0);
+        const inst2 = FakeWebSocket.last();
+        inst2._open();
+        await vi.advanceTimersByTimeAsync(0);
+        // fresh token on the resubscribe
+        expect(inst2.sentFrames()).toContainEqual({ type: "subscribe", channel: "account_all/7", auth: "tok-1" });
     });
 });

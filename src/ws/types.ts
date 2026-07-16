@@ -34,6 +34,12 @@ export interface LighterWsConfig {
      * the SDK dynamically imports the optional `ws` package. Pass this to force a specific implementation.
      */
     WebSocketImpl?: WebSocketCtor;
+    /**
+     * Provider for the account-channel auth token. Required to subscribe to authenticated channels
+     * (`account_*`, `user_stats`, `pool_*`, `notification`, `rfq`) — those subscribe frames carry an
+     * `auth` field. Re-invoked on each (re)subscribe so an expiring token (~7h) is refreshed on reconnect.
+     */
+    getAuthToken?: () => string | Promise<string>;
     /** Keepalive frame interval (ms). Must be < 120000 (server closes idle connections at 2 min). Default 30000. */
     keepAliveMs?: number;
     /** Auto-reconnect on unexpected close. Default true. */

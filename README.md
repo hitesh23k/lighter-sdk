@@ -10,6 +10,62 @@ no per-platform native binaries.
 Includes a WASM-backed zk signer, a typed REST client, a WebSocket streaming client, a high-level
 venue-aware convenience client, and a browser build.
 
+## How it fits together
+
+The SDK is five building blocks. Your app talks to the high-level `LighterClient` (or the low-level
+pieces directly); the client handles the REST, WebSocket, and signing layers for you.
+
+```mermaid
+flowchart TB
+  subgraph app["Your app"]
+    fe["Frontend (browser)<br/>market UI · charts · user wallet"]
+    be["Backend (Node)<br/>bots · order routing · key storage"]
+  end
+
+  subgraph sdk["@hitesh23k/lighter-sdk"]
+    client["LighterClient<br/><i>high-level: trade by symbol</i>"]
+    onboard["LighterOnboarding<br/><i>link wallet → trading key</i>"]
+    rest["REST client<br/><i>reads + order submit</i>"]
+    ws["WebSocket client<br/><i>live prices + account feed</i>"]
+    signer["WASM signer<br/><i>signs transactions</i>"]
+  end
+
+  lighter[("Lighter exchange<br/>zk · robinhood")]
+
+  fe --> rest
+  fe --> ws
+  be --> client
+  client --> rest
+  client --> ws
+  client --> signer
+  onboard --> signer
+  onboard --> rest
+  rest <--> lighter
+  ws <--> lighter
+```
+
+| Block | What it does |
+|---|---|
+| **`LighterClient`** | The easy button. Trade by symbol ("buy 0.001 BTC"); it scales sizes/prices, maps `long`/`short`, and composes the layers below. |
+| **REST client** | Read data (markets, prices, funding, account, positions) and submit signed orders over HTTP. |
+| **WebSocket client** | Live feed: order book, trades, and your authenticated account updates. |
+| **Signer** | Produces Lighter's zk signatures (via WASM) so the exchange trusts your requests. |
+| **`LighterOnboarding`** | One-time setup that links a user's wallet to a programmatic trading key. |
+
+### Frontend vs backend
+
+The browser holds the user's wallet; the server does the trading. The only step that *must* run in the
+browser is the one wallet signature during onboarding — everything else can run wherever you like.
+
+| | 🖥️ Frontend (browser) | ⚙️ Backend (Node) |
+|---|---|---|
+| **Read market data** (prices, order book, funding, candles) | ✅ no auth needed | ✅ |
+| **Live streams** (order book, trades, account) | ✅ | ✅ |
+| **Wallet signature** during onboarding (`personal_sign`) | ✅ only here | — |
+| **Hold the trading key + place/cancel/modify orders** | possible, but | ✅ recommended (keep the key server-side) |
+| **Run bots / automated strategies** | — | ✅ |
+| **Entry point** | `@hitesh23k/lighter-sdk/browser` (see [Browser usage](#browser-usage)) | `@hitesh23k/lighter-sdk` |
+
 ## Install
 
 ```bash
@@ -50,6 +106,26 @@ client.streamOrderBook("BTC", (msg) => console.log(msg.type, msg));
 Everything low-level is still reachable via `client.rest` and `client.ws`. The sections below document
 those directly.
 
+What one order does under the hood (the safety rails are automatic):
+
+```mermaid
+sequenceDiagram
+  participant App
+  participant C as LighterClient
+  participant N as Nonce sequencer
+  participant S as Signer (WASM)
+  participant LX as Lighter
+
+  App->>C: placeMarketOrder({ symbol:"BTC", side:"long", size:0.001 })
+  C->>C: resolve market · scale size · compute worst-case price bound · check minimums
+  C->>N: reserve next nonce (serialized per account+key)
+  C->>S: sign order
+  S-->>C: signed tx
+  C->>LX: POST /sendTx
+  LX-->>C: tx hash
+  C-->>App: result
+```
+
 ## Trading setup (onboarding)
 
 To trade you need a **signer**: `{ apiPrivateKey, accountIndex, apiKeyIndex }`. Getting one is a one-time
@@ -58,7 +134,30 @@ setup per wallet:
 1. **Create an account** by depositing to Lighter via its L1 bridge (on-chain; not done by this SDK). Your
    `accountIndex` is then discoverable from your wallet address.
 2. **Associate an API key** — the SDK generates a key, L2-signs a ChangePubKey, your wallet approves it with
-   one `personal_sign`, and it's submitted. `LighterOnboarding` does this end to end:
+   one `personal_sign`, and it's submitted. This is a small frontend↔backend handshake:
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant FE as Frontend (wallet)
+  participant BE as Backend (SDK)
+  participant LX as Lighter
+
+  Note over User,LX: prerequisite — account already funded via L1 bridge deposit
+  BE->>LX: resolveAccountIndex(l1Address)
+  LX-->>BE: accountIndex
+  BE->>BE: prepareApiKey() — generate key + L2-sign ChangePubKey
+  BE-->>FE: messageToSign
+  FE->>User: "Approve trading key?"
+  User->>FE: personal_sign
+  FE-->>BE: L1 signature
+  BE->>LX: submitApiKey() — splice L1 sig + send (tx 8)
+  LX-->>BE: registered ✓
+  Note over BE: now { apiPrivateKey, accountIndex, apiKeyIndex } can trade
+```
+
+`LighterOnboarding` runs this end to end. If the wallet lives on the same side as the SDK (e.g. a Node
+script with a private key), one call does it all:
 
 ```ts
 import { LighterOnboarding, LighterClient } from "@hitesh23k/lighter-sdk";

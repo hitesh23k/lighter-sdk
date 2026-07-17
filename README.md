@@ -1,4 +1,4 @@
-# Lighter Perpetual Futures SDK for TypeScript & JavaScript
+# Lighter Perpetual Futures SDK for TS/JS: zkLighter & Robinhood-Chain
 
 [![npm version](https://img.shields.io/npm/v/@hitesh23k/lighter-sdk.svg)](https://www.npmjs.com/package/@hitesh23k/lighter-sdk)
 [![npm downloads](https://img.shields.io/npm/dm/@hitesh23k/lighter-sdk.svg)](https://www.npmjs.com/package/@hitesh23k/lighter-sdk)

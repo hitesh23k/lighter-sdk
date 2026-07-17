@@ -1,6 +1,6 @@
 {
   "name": "@hitesh23k/lighter-sdk",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Lighter TypeScript SDK for perpetual futures trading on zkLighter and Robinhood-Chain Lighter: place orders, bracket orders (TP/SL), stream real-time market data over WebSocket, onboard wallets, and sign transactions. Zero-dependency, runs in Node and the browser.",
   "license": "Apache-2.0",
   "author": "hitesh23k",

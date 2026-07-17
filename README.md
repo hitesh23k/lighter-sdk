@@ -6,9 +6,10 @@
 [![license](https://img.shields.io/npm/l/@hitesh23k/lighter-sdk.svg)](./LICENSE)
 [![zero dependencies](https://img.shields.io/badge/dependencies-0-brightgreen.svg)](#why-this-sdk)
 
-The unofficial **TypeScript / JavaScript SDK for [Lighter](https://lighter.xyz) (zkLighter)** — trade
-perpetual futures, place orders with take-profit and stop-loss, stream real-time market data over
-WebSocket, onboard wallets, and sign transactions, from **Node.js or the browser**.
+The unofficial **TypeScript / JavaScript SDK for [Lighter](https://lighter.xyz)** — trade perpetual
+futures, place orders with take-profit and stop-loss, stream real-time market data over WebSocket, onboard
+wallets, and sign transactions, from **Node.js or the browser**. Supports **both venues: zkLighter (`zk`)
+and Robinhood-Chain Lighter (`robinhood`)**, on mainnet and testnet.
 
 ```bash
 npm install @hitesh23k/lighter-sdk
@@ -32,6 +33,7 @@ signer compiled to WebAssembly and loads it in-process. You get a clean, typed A
 - 📊 **Read market data** — order books, prices, funding rates, candles, positions, balances
 - ⚡ **Real-time streaming** — WebSocket order book, trades, and authenticated account updates
 - 🔑 **Onboarding** — link a wallet to a trading key in one flow (nobody else has this)
+- 🔀 **Both venues** — zkLighter (`zk`) and Robinhood-Chain Lighter (`robinhood`), mainnet and testnet, one API
 - 🛡️ **Built-in safety** — automatic nonce sequencing, market-order price bounds, minimum-size checks
 - 🌐 **Runs everywhere** — Node.js and the browser, ESM and CommonJS, fully typed
 - 🪶 **Zero runtime dependencies** — ~50 KB browser bundle, no `ethers`/`axios` bloat
@@ -269,12 +271,22 @@ The browser bundle imports no Node built-ins, so it bundles cleanly with Vite, w
 
 ## Networks and venues
 
-| `venue` | Network | Description |
-|---|---|---|
-| `"zk"` | mainnet / testnet | zkLighter (USDC) — the main deployment |
-| `"robinhood"` | mainnet / testnet | Robinhood-Chain Lighter (USDG) |
+The SDK supports both Lighter deployments. Pick one with the `venue` option; everything else (the same
+`LighterClient` API, orders, streams, onboarding) works identically.
 
-Set `isMainnet: false` for testnet. The SDK resolves the correct host and signing chain id for you.
+| `venue` | Collateral | Networks | Description |
+|---|---|---|---|
+| `"zk"` (default) | USDC | mainnet, testnet | zkLighter, the main deployment |
+| `"robinhood"` | USDG | mainnet, testnet | Robinhood-Chain Lighter |
+
+```ts
+const zk = new LighterClient({ venue: "zk", isMainnet: true });          // zkLighter mainnet
+const rh = new LighterClient({ venue: "robinhood", isMainnet: true });   // Robinhood-Chain mainnet
+const test = new LighterClient({ venue: "zk", isMainnet: false });       // zkLighter testnet
+```
+
+`isMainnet: false` selects testnet. The SDK resolves the correct host and signing chain id per venue and
+network for you. Accounts and API keys are per-venue (an account on `zk` is unrelated to one on `robinhood`).
 
 ## How it works
 

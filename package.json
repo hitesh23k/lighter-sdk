@@ -1,7 +1,7 @@
 {
   "name": "@hitesh23k/lighter-sdk",
   "version": "0.4.0",
-  "description": "Lighter (zkLighter) TypeScript SDK for perpetual futures trading: place orders, bracket orders (TP/SL), stream real-time market data over WebSocket, onboard wallets, and sign transactions. Zero-dependency, runs in Node and the browser.",
+  "description": "Lighter TypeScript SDK for perpetual futures trading on zkLighter and Robinhood-Chain Lighter: place orders, bracket orders (TP/SL), stream real-time market data over WebSocket, onboard wallets, and sign transactions. Zero-dependency, runs in Node and the browser.",
   "license": "Apache-2.0",
   "author": "hitesh23k",
   "type": "commonjs",
@@ -73,7 +73,10 @@
     "sdk",
     "api",
     "robinhood",
-    "elliot"
+    "robinhood-chain",
+    "elliot",
+    "usdc",
+    "usdg"
   ],
   "homepage": "https://www.npmjs.com/package/@hitesh23k/lighter-sdk",
   "optionalDependencies": {

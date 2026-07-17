@@ -1,4 +1,4 @@
-# Lighter SDK for TypeScript & JavaScript
+# Lighter Perpetual Futures SDK for TypeScript & JavaScript
 
 [![npm version](https://img.shields.io/npm/v/@hitesh23k/lighter-sdk.svg)](https://www.npmjs.com/package/@hitesh23k/lighter-sdk)
 [![npm downloads](https://img.shields.io/npm/dm/@hitesh23k/lighter-sdk.svg)](https://www.npmjs.com/package/@hitesh23k/lighter-sdk)

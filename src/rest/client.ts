@@ -9,11 +9,17 @@ import {
     signCancelAllOrders,
     signModifyOrder,
     signUpdateLeverage,
+    signUpdateMargin,
+    signWithdraw,
+    signTransfer,
+    signCreateGroupedOrders,
     signApproveIntegrator,
     createAuthToken,
     type LighterClientContext,
+    type LighterGroupedOrder,
 } from "../signer/core";
 import NonceManager from "./nonce-manager";
+import { LighterApiError } from "../errors";
 import {
     LighterRestClientConfig,
     LighterIntegratorConfig,
@@ -372,6 +378,39 @@ export default class LighterRestClient {
         return res.nonce;
     }
 
+    /** Look up a transaction by hash. Response shape is passthrough (includes a `status`). */
+    public async getTransaction(hash: string): Promise<any> {
+        return this.getJson<any>("getTransaction", LighterConstant.ENDPOINTS.transaction, { by: "hash", value: hash });
+    }
+
+    /**
+     * Poll a transaction by hash until it reaches a terminal state (executed/committed or failed/rejected)
+     * or `timeoutMs` elapses. Returns the final transaction object. Statuses are matched case-insensitively.
+     */
+    public async waitForTransaction(
+        hash: string,
+        opts: { timeoutMs?: number; intervalMs?: number } = {},
+    ): Promise<any> {
+        const timeoutMs = opts.timeoutMs ?? 30000;
+        const intervalMs = opts.intervalMs ?? 1000;
+        const deadline = Date.now() + timeoutMs;
+        const terminal = /^(executed|committed|failed|rejected)$/i;
+        let last: any = null;
+        while (Date.now() < deadline) {
+            try {
+                const res = await this.getTransaction(hash);
+                last = res?.transaction ?? res;
+                const status = String(last?.status ?? "");
+                if (terminal.test(status)) return last;
+            } catch (err) {
+                // transient (tx not yet indexed) — keep polling until the deadline
+                last = last ?? { error: (err as Error)?.message };
+            }
+            await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        throw new LighterApiError(`waitForTransaction::timed out after ${timeoutMs}ms for ${hash}`, undefined, undefined, "waitForTransaction");
+    }
+
     // ==================== WRITE PATH (signer) ====================
 
     /**
@@ -565,6 +604,82 @@ export default class LighterRestClient {
         });
     }
 
+    /** Add or remove isolated margin on a market (tx 29). `usdcAmount` is scaled to USDC decimals. */
+    public async updateMargin(
+        ctx: LighterSignerContext,
+        params: { marketIndex: number; usdcAmount: bigint | number; direction: number },
+    ): Promise<LighterSendTxResponse> {
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signUpdateMargin(this.clientContext(ctx), {
+                marketIndex: params.marketIndex,
+                usdcAmount: params.usdcAmount,
+                direction: params.direction,
+                nonce,
+            });
+            return this.sendTx("updateMargin", signed.txType, signed.txInfo);
+        });
+    }
+
+    /** Withdraw funds from the L2 account back to the L1 owner (tx 13). `amount` scaled to asset decimals. */
+    public async withdraw(
+        ctx: LighterSignerContext,
+        params: { amount: bigint | number; assetIndex?: number; routeType?: number },
+    ): Promise<LighterSendTxResponse> {
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signWithdraw(this.clientContext(ctx), {
+                amount: params.amount,
+                assetIndex: params.assetIndex,
+                routeType: params.routeType,
+                nonce,
+            });
+            return this.sendTx("withdraw", signed.txType, signed.txInfo);
+        });
+    }
+
+    /**
+     * Transfer funds to another Lighter account (tx 12). `amount` scaled to asset decimals.
+     *
+     * ADVANCED: a transfer additionally requires the account owner's L1 (EVM) signature merged into the tx's
+     * `L1Sig` field — the L2 signature alone is rejected ("fail to l1 signature"). This method signs only the
+     * L2 part; the caller is responsible for constructing + merging the L1 signature per Lighter's transfer
+     * message spec before it will be accepted. Withdrawals do NOT need this.
+     */
+    public async transfer(
+        ctx: LighterSignerContext,
+        params: { toAccountIndex: number; amount: bigint | number; assetIndex?: number; usdcFee?: bigint | number; memo?: string },
+    ): Promise<LighterSendTxResponse> {
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signTransfer(this.clientContext(ctx), {
+                toAccountIndex: params.toAccountIndex,
+                amount: params.amount,
+                assetIndex: params.assetIndex,
+                usdcFee: params.usdcFee,
+                memo: params.memo,
+                nonce,
+            });
+            return this.sendTx("transfer", signed.txType, signed.txInfo);
+        });
+    }
+
+    /**
+     * Submit a grouped order (tx 28): OTO / OCO / OTOCO (bracket). Orders are pre-scaled legs; use the
+     * high-level client's `placeBracketOrder` for a human-unit API.
+     */
+    public async createGroupedOrders(
+        ctx: LighterSignerContext,
+        params: { groupingType: number; orders: LighterGroupedOrder[]; applyIntegratorFee?: boolean },
+    ): Promise<LighterSendTxResponse> {
+        return this.nonces.withNonce(ctx.accountIndex, ctx.apiKeyIndex, async (nonce) => {
+            const signed = await signCreateGroupedOrders(this.clientContext(ctx), {
+                groupingType: params.groupingType,
+                orders: params.orders,
+                ...this.integratorInput(params.applyIntegratorFee),
+                nonce,
+            });
+            return this.sendTx("createGroupedOrders", signed.txType, signed.txInfo);
+        });
+    }
+
     /**
      * Submit a fully-signed ChangePubKey tx (tx_type 8) whose txInfo already has both the L2 self-signature
      * and the merged-in L1 signature. Used to bind a new API key on-chain.
@@ -622,13 +737,13 @@ export default class LighterRestClient {
             try {
                 parsed = JSON.parse(rawText) as LighterSendTxResponse;
             } catch {
-                throw new Error(`LighterRestClient::${methodName}::non-JSON response: ${rawText}`);
+                throw new LighterApiError(`LighterRestClient::${methodName}::non-JSON response: ${rawText}`, undefined, response.status, methodName);
             }
         }
         if (!response.ok || !parsed || (parsed.code !== undefined && parsed.code !== 200)) {
             const message = parsed?.message || rawText || `Lighter sendTx failed with status ${response.status}`;
             Logger.error(`LighterRestClient::${methodName}::${message}`);
-            throw new Error(String(message));
+            throw new LighterApiError(String(message), parsed?.code, response.status, methodName);
         }
         return parsed;
     }
@@ -657,13 +772,13 @@ export default class LighterRestClient {
             try {
                 parsed = JSON.parse(rawText) as T;
             } catch {
-                throw new Error(`LighterRestClient::${methodName}::non-JSON response: ${rawText}`);
+                throw new LighterApiError(`LighterRestClient::${methodName}::non-JSON response: ${rawText}`, undefined, response.status, methodName);
             }
         }
         if (!response.ok || !parsed || (parsed.code !== undefined && parsed.code !== 200)) {
             const message = parsed?.message || rawText || `Lighter request failed with status ${response.status}`;
             Logger.error(`LighterRestClient::${methodName}::${message}`);
-            throw new Error(String(message));
+            throw new LighterApiError(String(message), parsed?.code, response.status, methodName);
         }
         return parsed;
     }

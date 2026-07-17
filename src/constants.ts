@@ -82,6 +82,7 @@ export default class LighterConstant {
         candles: "/api/v1/candles",
         markPriceCandles: "/api/v1/markPriceCandles",
         nextNonce: "/api/v1/nextNonce",
+        transaction: "/api/v1/transaction",
         sendTx: "/api/v1/sendTx",
         sendTxBatch: "/api/v1/sendTxBatch",
     } as const;
@@ -93,13 +94,45 @@ export default class LighterConstant {
      */
     public static readonly TX_TYPE = {
         changePubKey: 8,
+        transfer: 12,
+        withdraw: 13,
         createOrder: 14,
         cancelOrder: 15,
         cancelAllOrders: 16,
         modifyOrder: 17,
         updateLeverage: 20,
+        createGroupedOrders: 28,
+        updateMargin: 29,
         approveIntegrator: 45,
     } as const;
+
+    /** Grouped-order strategies for SignCreateGroupedOrders (verified against the signer). */
+    public static readonly GROUPING_TYPE = {
+        /** One-Triggers-Other: a main order that, once filled, activates a second (2 orders). */
+        OTO: 1,
+        /** One-Cancels-Other: two equal-size orders; filling one cancels the other (2 orders). */
+        OCO: 2,
+        /** One-Triggers-A-One-Cancels-Other (bracket): main entry + TP + SL (3 orders). */
+        OTOCO: 3,
+    } as const;
+
+    /** SignUpdateMargin direction. */
+    public static readonly MARGIN_DIRECTION = {
+        ADD: 0,
+        REMOVE: 1,
+    } as const;
+
+    /** Withdraw/transfer route types (0 = standard/slow, 1 = fast). */
+    public static readonly ROUTE_TYPE = {
+        STANDARD: 0,
+        FAST: 1,
+    } as const;
+
+    /** USDC asset index (asset indices are 1-based; the signer rejects 0). */
+    public static readonly ASSET_INDEX_USDC = 1;
+
+    /** A zero 32-byte transfer memo (the signer requires a 32-byte hex memo). */
+    public static readonly ZERO_MEMO = "0x" + "00".repeat(32);
 
     /** A reasonable default ApproveIntegrator validity window (epoch MS). The user re-approves after this. */
     public static readonly INTEGRATOR_APPROVAL_TTL_MS = 365 * 24 * 60 * 60 * 1000;

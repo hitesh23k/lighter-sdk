@@ -11,13 +11,18 @@ vi.mock("../src/signer/core", () => ({
     signCancelAllOrders: vi.fn(async () => ({ txType: 16, txInfo: "{}" })),
     signModifyOrder: vi.fn(async () => ({ txType: 17, txInfo: "{}" })),
     signUpdateLeverage: vi.fn(async () => ({ txType: 20, txInfo: "{}" })),
+    signUpdateMargin: vi.fn(async () => ({ txType: 29, txInfo: "{}" })),
+    signWithdraw: vi.fn(async () => ({ txType: 13, txInfo: "{}" })),
+    signTransfer: vi.fn(async () => ({ txType: 12, txInfo: "{}" })),
+    signCreateGroupedOrders: vi.fn(async () => ({ txType: 28, txInfo: "{}" })),
     signApproveIntegrator: vi.fn(async () => ({ txType: 45, txInfo: "{}", messageToSign: "L1-message" })),
     createAuthToken: vi.fn(async () => "auth-token-abc"),
 }));
 
 import LighterRestClient from "../src/rest/client";
 import LighterConstant from "../src/constants";
-import { signCreateOrder, signCancelAllOrders, signUpdateLeverage, createAuthToken } from "../src/signer/core";
+import { LighterApiError } from "../src/errors";
+import { signCreateOrder, signCancelAllOrders, signUpdateLeverage, signUpdateMargin, signWithdraw, signTransfer, signCreateGroupedOrders, createAuthToken } from "../src/signer/core";
 
 type FetchCall = { url: string; init?: any };
 let calls: FetchCall[];
@@ -323,5 +328,77 @@ describe("LighterRestClient cancelAllOrders (H3) + market-order guard (H1)", () 
         await expect(
             c.createMarketOrder(SIGNER, { marketIndex: 1, baseAmount: 10n, isAsk: false, reduceOnly: false, clientOrderIndex: 1, price: 0 }),
         ).rejects.toThrow(/positive worst-case price bound is required/);
+    });
+});
+
+describe("LighterRestClient fund + margin + grouped ops", () => {
+    const write = (label: string) => [
+        { match: "/nextNonce", body: { nonce: 1 } },
+        { match: "/sendTx", body: { code: 200, tx_hash: `0x${label}` } },
+    ];
+
+    it("updateMargin signs tx 29 and posts it", async () => {
+        mockFetch(write("m"));
+        const c = new LighterRestClient();
+        const r = await c.updateMargin(SIGNER, { marketIndex: 1, usdcAmount: 1_000_000, direction: 0 });
+        expect(r.tx_hash).toBe("0xm");
+        expect((signUpdateMargin as any).mock.calls[0][1]).toMatchObject({ marketIndex: 1, usdcAmount: 1_000_000, direction: 0, nonce: 1 });
+        expect(calls.find((x) => x.url.includes("/sendTx"))?.init.body).toContain("tx_type=29");
+    });
+
+    it("withdraw signs tx 13", async () => {
+        mockFetch(write("w"));
+        const c = new LighterRestClient();
+        const r = await c.withdraw(SIGNER, { amount: 5_000_000 });
+        expect(r.tx_hash).toBe("0xw");
+        expect((signWithdraw as any).mock.calls[0][1]).toMatchObject({ amount: 5_000_000, nonce: 1 });
+    });
+
+    it("transfer signs tx 12", async () => {
+        mockFetch(write("t"));
+        const c = new LighterRestClient();
+        await c.transfer(SIGNER, { toAccountIndex: 22, amount: 2_000_000 });
+        expect((signTransfer as any).mock.calls[0][1]).toMatchObject({ toAccountIndex: 22, amount: 2_000_000, nonce: 1 });
+    });
+
+    it("createGroupedOrders signs tx 28", async () => {
+        mockFetch(write("g"));
+        const c = new LighterRestClient();
+        const orders = [{ marketIndex: 1, clientOrderIndex: 1, baseAmount: 10n, price: 5, isAsk: false, orderType: 1, timeInForce: 0, reduceOnly: false, orderExpiry: 0 }];
+        await c.createGroupedOrders(SIGNER, { groupingType: 3, orders });
+        expect((signCreateGroupedOrders as any).mock.calls[0][1]).toMatchObject({ groupingType: 3, nonce: 1 });
+        expect((signCreateGroupedOrders as any).mock.calls[0][1].orders).toHaveLength(1);
+    });
+});
+
+describe("LighterRestClient waitForTransaction + typed errors", () => {
+    it("polls getTransaction until a terminal status", async () => {
+        vi.useFakeTimers();
+        let calls = 0;
+        const fn = vi.fn(async (url: string) => {
+            calls++;
+            const status = calls >= 3 ? "executed" : "pending";
+            return { ok: true, status: 200, text: async () => JSON.stringify({ code: 200, transaction: { status, hash: "0xabc" } }) } as any;
+        });
+        vi.stubGlobal("fetch", fn);
+        const c = new LighterRestClient();
+        const p = c.waitForTransaction("0xabc", { intervalMs: 1000, timeoutMs: 10000 });
+        await vi.advanceTimersByTimeAsync(3000);
+        const tx = await p;
+        expect(tx.status).toBe("executed");
+        vi.useRealTimers();
+    });
+
+    it("throws a typed LighterApiError on a non-200 code", async () => {
+        mockFetch([{ match: "/tokenlist", body: { code: 400, message: "nope" } }]);
+        const c = new LighterRestClient();
+        await expect(c.getTokenList()).rejects.toBeInstanceOf(LighterApiError);
+        try {
+            await c.getTokenList();
+        } catch (e: any) {
+            expect(e).toBeInstanceOf(LighterApiError);
+            expect(e.code).toBe(400);
+            expect(e.method).toBe("getTokenList");
+        }
     });
 });

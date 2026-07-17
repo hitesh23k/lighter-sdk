@@ -8,7 +8,11 @@ signer compiled to WebAssembly and loads it in-process, so signing works on any 
 no per-platform native binaries.
 
 Includes a WASM-backed zk signer, a typed REST client, a WebSocket streaming client, a high-level
-venue-aware convenience client, and a browser build.
+venue-aware convenience client, bracket orders, onboarding, and a browser build.
+
+**Why this one:** zero runtime dependencies (no ethers/axios), a ~50 KB browser bundle, and a human-unit
+API — trade by symbol (`buy 0.5 BTC`), not by hand-scaled integers. Nonce-safe under concurrency,
+market-order price bounds, and onboarding built in. Verified end to end on testnet across both venues.
 
 ## How it fits together
 
@@ -125,6 +129,30 @@ sequenceDiagram
   LX-->>C: tx hash
   C-->>App: result
 ```
+
+## Bracket orders, margin, and account ops
+
+```ts
+// Bracket order (OTOCO): entry + take-profit + stop-loss in ONE atomic tx.
+await client.placeBracketOrder({
+  symbol: "BTC", side: "long", size: 0.01,
+  takeProfit: 72000,   // trigger prices in human quote units
+  stopLoss: 60000,
+});
+// One-sided bracket (OTO): pass only takeProfit or only stopLoss.
+// Limit entry: entry: { type: "limit", price: 63000 }.
+
+await client.closePosition("BTC");           // market-close (reduce-only)
+await client.closeAllPositions();            // flatten everything
+await client.adjustMargin({ symbol: "BTC", amount: 25, action: "add" }); // isolated margin, human USDC
+await client.withdraw({ amount: 100 });      // USDC back to your L1 wallet
+
+const tx = await client.placeMarketOrder({ symbol: "BTC", side: "long", size: 0.001 });
+await client.waitForTransaction(tx.tx_hash!); // poll until executed/failed
+```
+
+Errors are typed — catch `LighterApiError` (has `.code`, `.status`), `LighterSignerError`, or
+`LighterValidationError`, all extending `LighterError`.
 
 ## Trading setup (onboarding)
 

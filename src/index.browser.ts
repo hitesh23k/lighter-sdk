@@ -16,6 +16,10 @@ export {
     signCancelAllOrders,
     signModifyOrder,
     signUpdateLeverage,
+    signUpdateMargin,
+    signWithdraw,
+    signTransfer,
+    signCreateGroupedOrders,
     signChangePubKey,
     signApproveIntegrator,
     createAuthToken,
@@ -26,6 +30,11 @@ export {
     type LighterCancelAllOrdersInput,
     type LighterModifyOrderInput,
     type LighterUpdateLeverageInput,
+    type LighterUpdateMarginInput,
+    type LighterWithdrawInput,
+    type LighterTransferInput,
+    type LighterGroupedOrder,
+    type LighterCreateGroupedOrdersInput,
     type LighterSignedTx,
     type LighterApiKeyPair,
     type LighterChangePubKeyInput,
@@ -33,6 +42,9 @@ export {
     type LighterApproveIntegratorInput,
     type LighterApproveIntegratorResult,
 } from "./signer/core";
+
+// Typed error classes
+export { LighterError, LighterApiError, LighterSignerError, LighterValidationError } from "./errors";
 
 // High-level venue-aware convenience client
 export { default as LighterClient } from "./client";
@@ -42,6 +54,7 @@ export type {
     OrderSide,
     PlaceMarketOrderParams,
     PlaceLimitOrderParams,
+    PlaceBracketOrderParams,
 } from "./client";
 
 // Onboarding (associate an API key with an account so you can trade)

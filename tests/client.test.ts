@@ -9,12 +9,16 @@ function makeFakeRest() {
         ]),
         createMarketOrder: vi.fn(async () => ({ code: 200, tx_hash: "0xm" })),
         createLimitOrder: vi.fn(async () => ({ code: 200, tx_hash: "0xl" })),
+        createGroupedOrders: vi.fn(async () => ({ code: 200, tx_hash: "0xg" })),
         cancelAllOrders: vi.fn(async () => ({ code: 200, tx_hash: "0xca" })),
         updateLeverage: vi.fn(async () => ({ code: 200 })),
+        updateMargin: vi.fn(async () => ({ code: 200, tx_hash: "0xmargin" })),
+        withdraw: vi.fn(async () => ({ code: 200, tx_hash: "0xwd" })),
+        transfer: vi.fn(async () => ({ code: 200, tx_hash: "0xtr" })),
         cancelOrder: vi.fn(async () => ({ code: 200 })),
         getActiveOrders: vi.fn(async () => [{ order_index: 5, market_index: 1 }]),
         getAccount: vi.fn(async () => ({ account_index: 7, positions: [] })),
-        getPositions: vi.fn(async () => []),
+        getPositions: vi.fn(async () => [{ market_id: 1, symbol: "BTC", sign: 1, position: "0.5" }]),
     };
 }
 
@@ -143,6 +147,72 @@ describe("LighterClient leverage + cancel", () => {
         const c = client();
         await c.cancelAllOrders(undefined, "ETH");
         expect(rest.cancelAllOrders.mock.calls[0][1]).toEqual({ marketIndex: 2 });
+    });
+});
+
+describe("LighterClient bracket orders", () => {
+    it("placeBracketOrder with TP+SL builds an OTOCO with 3 legs (entry + reduce-only TP + SL)", async () => {
+        const c = client();
+        await c.placeBracketOrder({ symbol: "BTC", side: "long", size: "0.01", takeProfit: 70000, stopLoss: 55000 });
+        const arg = rest.createGroupedOrders.mock.calls[0][1];
+        expect(arg.groupingType).toBe(3); // OTOCO
+        expect(arg.orders).toHaveLength(3);
+        const [main, tp, sl] = arg.orders;
+        expect(main.isAsk).toBe(false); // long entry
+        expect(main.reduceOnly).toBe(false);
+        expect(tp.isAsk).toBe(true); // close a long -> sell
+        expect(tp.reduceOnly).toBe(true);
+        expect(tp.baseAmount).toBe(0n); // legs close whatever the entry fills
+        expect(tp.triggerPrice).toBe(7000000); // 70000 * 10^2
+        expect(sl.reduceOnly).toBe(true);
+        expect(sl.triggerPrice).toBe(5500000);
+    });
+
+    it("placeBracketOrder with only a stopLoss builds an OTO (2 legs)", async () => {
+        const c = client();
+        await c.placeBracketOrder({ symbol: "BTC", side: "long", size: "0.01", stopLoss: 55000 });
+        const arg = rest.createGroupedOrders.mock.calls[0][1];
+        expect(arg.groupingType).toBe(1); // OTO
+        expect(arg.orders).toHaveLength(2);
+    });
+
+    it("placeBracketOrder requires at least one of TP/SL", async () => {
+        const c = client();
+        await expect(c.placeBracketOrder({ symbol: "BTC", side: "long", size: "0.01" })).rejects.toThrow(/requires takeProfit and\/or stopLoss/);
+    });
+
+    it("supports a limit entry", async () => {
+        const c = client();
+        await c.placeBracketOrder({ symbol: "BTC", side: "long", size: "0.01", entry: { type: "limit", price: 60000 }, takeProfit: 70000 });
+        const main = rest.createGroupedOrders.mock.calls[0][1].orders[0];
+        expect(main.orderType).toBe(0); // LIMIT
+        expect(main.price).toBe(6000000); // 60000 * 10^2
+    });
+});
+
+describe("LighterClient margin / close / fund ops (human units)", () => {
+    it("adjustMargin scales human USDC by 10^6 and maps add/remove", async () => {
+        const c = client();
+        await c.adjustMargin({ symbol: "BTC", amount: "25", action: "add" });
+        expect(rest.updateMargin.mock.calls[0][1]).toMatchObject({ marketIndex: 1, usdcAmount: 25000000n, direction: 0 });
+        await c.adjustMargin({ symbol: "BTC", amount: "10", action: "remove" });
+        expect(rest.updateMargin.mock.calls[1][1].direction).toBe(1);
+    });
+
+    it("closePosition market-closes a long with a reduce-only opposite order", async () => {
+        const c = client();
+        const r = await c.closePosition("BTC");
+        expect(r?.tx_hash).toBe("0xm");
+        const arg = rest.createMarketOrder.mock.calls[0][1];
+        expect(arg.isAsk).toBe(true); // long -> sell to close
+        expect(arg.reduceOnly).toBe(true);
+        expect(arg.baseAmount).toBe(50000n); // 0.5 * 10^5
+    });
+
+    it("withdraw scales human USDC by 10^6 and defaults to the fast route", async () => {
+        const c = client();
+        await c.withdraw({ amount: "100" });
+        expect(rest.withdraw.mock.calls[0][1]).toMatchObject({ amount: 100000000n, routeType: 1 });
     });
 });
 

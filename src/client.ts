@@ -3,7 +3,8 @@ import LighterConstant from "./constants";
 import LighterHelper from "./helpers";
 import LighterRestClient from "./rest/client";
 import LighterWs from "./ws/client";
-import { createAuthToken } from "./signer/core";
+import { createAuthToken, type LighterGroupedOrder } from "./signer/core";
+import { LighterValidationError } from "./errors";
 import {
     LighterRestClientConfig,
     LighterVenue,
@@ -23,6 +24,14 @@ export type OrderSide = "long" | "short";
 const DEFAULT_MARKET_SLIPPAGE = 0.05;
 /** Refresh cached market data (incl. last price for slippage bounds) if older than this before a market order. */
 const DEFAULT_MARKET_STALENESS_MS = 15_000;
+/** USDC collateral decimals — margin/withdraw/transfer amounts scale by 10^6. */
+const USDC_DECIMALS = 6;
+/**
+ * Resting lifetime for a bracket's TP/SL (and limit-entry) legs. Grouped-order legs require a concrete
+ * future epoch-ms expiry (the -1 sentinel that single trigger orders accept is NOT honoured here).
+ * ~27 days, just under Lighter's 28-day maximum.
+ */
+const BRACKET_LEG_TTL_MS = 27 * 24 * 60 * 60 * 1000;
 
 /** Uniform random in [0,1) preferring crypto entropy (collision-resistant client_order_index across processes). */
 function randomUnit(): number {
@@ -91,6 +100,21 @@ export interface PlaceLimitOrderParams {
     reduceOnly?: boolean;
     applyIntegratorFee?: boolean;
     clientOrderIndex?: number;
+}
+
+export interface PlaceBracketOrderParams {
+    symbol: string;
+    /** Entry side. Take-profit/stop-loss close the opposite way automatically. */
+    side: OrderSide;
+    /** Entry size in human token units. */
+    size: number | string;
+    /** Entry as a market order (default) or a resting limit at `price`. */
+    entry?: { type: "market"; slippage?: number } | { type: "limit"; price: number | string };
+    /** Take-profit trigger price (human quote units). Provide TP and/or SL — at least one is required. */
+    takeProfit?: number | string;
+    /** Stop-loss trigger price (human quote units). */
+    stopLoss?: number | string;
+    applyIntegratorFee?: boolean;
 }
 
 /**
@@ -281,6 +305,151 @@ export default class LighterClient {
             reduceOnly: params.reduceOnly,
             applyIntegratorFee: params.applyIntegratorFee,
         });
+    }
+
+    /**
+     * Place a bracket order in ONE atomic transaction: a market/limit entry plus a take-profit and/or
+     * stop-loss that close the position automatically. TP+SL = OTOCO; a single TP or SL = OTO. Prices and
+     * size are human units; the TP/SL legs are reduce-only and close whatever the entry fills.
+     */
+    public async placeBracketOrder(params: PlaceBracketOrderParams, ctx?: LighterSignerContext): Promise<LighterSendTxResponse> {
+        const signer = this.requireSigner(ctx);
+        if (params.takeProfit == null && params.stopLoss == null) {
+            throw new LighterValidationError(
+                "LighterClient::placeBracketOrder requires takeProfit and/or stopLoss; use placeMarketOrder/placeLimitOrder for a plain order",
+            );
+        }
+        await this.ensureFreshMarkets(this.marketStalenessMs);
+        const meta = this.market(params.symbol);
+        const isAsk = params.side === "short";
+        const closeIsAsk = !isAsk; // TP/SL close the position the opposite way
+        const baseAmount = LighterHelper.toBaseAmount(params.size, meta.sizeDecimals);
+        this.assertOrderMinimums(meta, baseAmount, Number(params.size), meta.lastTradePrice || undefined);
+        const slip = this.defaultSlippage;
+        const toPrice = (p: number | string) => Number(LighterHelper.toPriceInt(p, meta.priceDecimals));
+        const boundFor = (triggerHuman: number, closingIsAsk: boolean) => {
+            const worst = closingIsAsk ? triggerHuman * (1 - slip) : triggerHuman * (1 + slip);
+            return Math.max(1, Number(LighterHelper.toPriceInt(worst, meta.priceDecimals)));
+        };
+
+        // Grouped-order legs need a concrete future expiry (unlike single orders' -1 sentinel).
+        const legExpiry = Date.now() + BRACKET_LEG_TTL_MS;
+
+        // Entry (main) leg.
+        const entry = params.entry ?? { type: "market" as const };
+        let mainPrice: number;
+        let orderType: number;
+        let timeInForce: number;
+        let orderExpiry: number;
+        if (entry.type === "limit") {
+            mainPrice = toPrice(entry.price);
+            orderType = LighterConstant.ORDER_TYPE.LIMIT;
+            timeInForce = LighterConstant.TIME_IN_FORCE.GOOD_TILL_TIME;
+            orderExpiry = legExpiry;
+        } else {
+            if (!(meta.lastTradePrice > 0)) {
+                throw new LighterValidationError(`LighterClient::placeBracketOrder::no reference price for ${meta.symbol}; use a limit entry`);
+            }
+            const s = entry.slippage ?? slip;
+            const worst = isAsk ? meta.lastTradePrice * (1 - s) : meta.lastTradePrice * (1 + s);
+            mainPrice = Number(LighterHelper.toPriceInt(worst, meta.priceDecimals));
+            orderType = LighterConstant.ORDER_TYPE.MARKET;
+            timeInForce = LighterConstant.TIME_IN_FORCE.IMMEDIATE_OR_CANCEL;
+            orderExpiry = 0;
+        }
+
+        const legs: LighterGroupedOrder[] = [
+            { marketIndex: meta.marketId, clientOrderIndex: this.nextClientOrderIndex(), baseAmount, price: mainPrice, isAsk, orderType, timeInForce, reduceOnly: false, orderExpiry },
+        ];
+        if (params.takeProfit != null) {
+            const trig = toPrice(params.takeProfit);
+            legs.push({
+                marketIndex: meta.marketId, clientOrderIndex: this.nextClientOrderIndex(), baseAmount: 0n,
+                price: boundFor(Number(params.takeProfit), closeIsAsk), isAsk: closeIsAsk,
+                orderType: LighterConstant.ORDER_TYPE.TAKE_PROFIT, timeInForce: LighterConstant.TIME_IN_FORCE.IMMEDIATE_OR_CANCEL,
+                reduceOnly: true, triggerPrice: trig, orderExpiry: legExpiry,
+            });
+        }
+        if (params.stopLoss != null) {
+            const trig = toPrice(params.stopLoss);
+            legs.push({
+                marketIndex: meta.marketId, clientOrderIndex: this.nextClientOrderIndex(), baseAmount: 0n,
+                price: boundFor(Number(params.stopLoss), closeIsAsk), isAsk: closeIsAsk,
+                orderType: LighterConstant.ORDER_TYPE.STOP_LOSS, timeInForce: LighterConstant.TIME_IN_FORCE.IMMEDIATE_OR_CANCEL,
+                reduceOnly: true, triggerPrice: trig, orderExpiry: legExpiry,
+            });
+        }
+        const groupingType =
+            params.takeProfit != null && params.stopLoss != null ? LighterConstant.GROUPING_TYPE.OTOCO : LighterConstant.GROUPING_TYPE.OTO;
+        return this.rest.createGroupedOrders(signer, { groupingType, orders: legs, applyIntegratorFee: params.applyIntegratorFee });
+    }
+
+    /** Add or remove isolated margin on a market. `amount` is in human USDC. */
+    public async adjustMargin(
+        params: { symbol: string; amount: number | string; action: "add" | "remove" },
+        ctx?: LighterSignerContext,
+    ): Promise<LighterSendTxResponse> {
+        const signer = this.requireSigner(ctx);
+        await this.loadMarkets();
+        const meta = this.market(params.symbol);
+        const usdcAmount = LighterHelper.toBaseAmount(params.amount, USDC_DECIMALS);
+        return this.rest.updateMargin(signer, {
+            marketIndex: meta.marketId,
+            usdcAmount,
+            direction: params.action === "remove" ? LighterConstant.MARGIN_DIRECTION.REMOVE : LighterConstant.MARGIN_DIRECTION.ADD,
+        });
+    }
+
+    /** Market-close the open position in `symbol` (reduce-only). Returns null if already flat. */
+    public async closePosition(symbol: string, ctx?: LighterSignerContext): Promise<LighterSendTxResponse | null> {
+        const signer = this.requireSigner(ctx);
+        await this.loadMarkets();
+        const meta = this.market(symbol);
+        const positions = await this.rest.getPositions(signer.accountIndex);
+        const pos = positions.find((p) => Number(p.market_id) === meta.marketId);
+        const size = pos ? Math.abs(Number(pos.position)) : 0;
+        if (!pos || !(size > 0)) return null;
+        const closeSide: OrderSide = Number(pos.sign) > 0 ? "short" : "long"; // long position -> sell to close
+        return this.placeMarketOrder({ symbol, side: closeSide, size, reduceOnly: true }, signer);
+    }
+
+    /** Market-close every open position (reduce-only). Continues past individual failures. */
+    public async closeAllPositions(ctx?: LighterSignerContext): Promise<Array<{ symbol: string; result: LighterSendTxResponse | null; error?: string }>> {
+        const signer = this.requireSigner(ctx);
+        await this.loadMarkets();
+        const positions = await this.rest.getPositions(signer.accountIndex);
+        const out: Array<{ symbol: string; result: LighterSendTxResponse | null; error?: string }> = [];
+        for (const p of positions) {
+            if (!(Math.abs(Number(p.position)) > 0)) continue;
+            const meta = this.marketsById?.get(Number(p.market_id));
+            const symbol = meta?.symbol ?? String(p.symbol ?? p.market_id);
+            try {
+                out.push({ symbol, result: await this.closePosition(symbol, signer) });
+            } catch (err: any) {
+                out.push({ symbol, result: null, error: err?.message });
+            }
+        }
+        return out;
+    }
+
+    /**
+     * Withdraw USDC from the L2 account back to the L1 owner. `amount` is in human USDC. Defaults to the
+     * fast route (the standard route is not available on all networks).
+     *
+     * Note: account transfers to another Lighter account additionally require the account owner's L1
+     * signature (like onboarding). Use the low-level `client.rest.transfer` + your own L1 signing for that.
+     */
+    public async withdraw(params: { amount: number | string; routeType?: number }, ctx?: LighterSignerContext): Promise<LighterSendTxResponse> {
+        const signer = this.requireSigner(ctx);
+        return this.rest.withdraw(signer, {
+            amount: LighterHelper.toBaseAmount(params.amount, USDC_DECIMALS),
+            routeType: params.routeType ?? LighterConstant.ROUTE_TYPE.FAST,
+        });
+    }
+
+    /** Poll a transaction hash until it reaches a terminal state (see {@link LighterRestClient.waitForTransaction}). */
+    public async waitForTransaction(hash: string, opts?: { timeoutMs?: number; intervalMs?: number }): Promise<any> {
+        return this.rest.waitForTransaction(hash, opts);
     }
 
     /** Set per-market leverage (clamped to the market's max). */

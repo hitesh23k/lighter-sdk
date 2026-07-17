@@ -7,6 +7,10 @@ import {
     signCancelAllOrders,
     signModifyOrder,
     signUpdateLeverage,
+    signUpdateMargin,
+    signWithdraw,
+    signTransfer,
+    signCreateGroupedOrders,
     signApproveIntegrator,
     createAuthToken,
     generateApiKey,
@@ -152,5 +156,38 @@ describe.runIf(artifactsPresent)("LighterSigner (WASM)", () => {
         const signed = await signCancelAllOrders(ctx, { marketIndex: 255, nonce: 0 });
         expect(signed.txType).toBe(16);
         expect(JSON.parse(signed.txInfo).Sig).toBeTruthy();
+    });
+
+    it("signs update-margin (txType 29)", async () => {
+        const signed = await signUpdateMargin(ctx, { marketIndex: 1, usdcAmount: 1_000_000, direction: 0, nonce: 0 });
+        expect(signed.txType).toBe(29);
+        expect(JSON.parse(signed.txInfo).Sig).toBeTruthy();
+    });
+
+    it("signs withdraw (txType 13)", async () => {
+        const signed = await signWithdraw(ctx, { amount: 1_000_000, nonce: 0 });
+        expect(signed.txType).toBe(13);
+        expect(JSON.parse(signed.txInfo).Sig).toBeTruthy();
+    });
+
+    it("signs transfer (txType 12) with a default 32-byte memo", async () => {
+        const signed = await signTransfer(ctx, { toAccountIndex: 22, amount: 1_000_000, nonce: 0 });
+        expect(signed.txType).toBe(12);
+        expect(JSON.parse(signed.txInfo).Sig).toBeTruthy();
+    });
+
+    it("signs an OTOCO bracket grouped order (txType 28)", async () => {
+        // Grouped trigger legs need a concrete future expiry (the -1 sentinel is not honoured here).
+        const legExpiry = 1893456000000; // 2030-01-01
+        const main = { marketIndex: 1, clientOrderIndex: 1, baseAmount: 20n, price: 617104, isAsk: false, orderType: 1, timeInForce: 0, reduceOnly: false, orderExpiry: 0 };
+        const tp = { marketIndex: 1, clientOrderIndex: 2, baseAmount: 0n, price: 700000, isAsk: true, orderType: 4, timeInForce: 0, reduceOnly: true, triggerPrice: 700000, orderExpiry: legExpiry };
+        const sl = { marketIndex: 1, clientOrderIndex: 3, baseAmount: 0n, price: 500000, isAsk: true, orderType: 2, timeInForce: 0, reduceOnly: true, triggerPrice: 500000, orderExpiry: legExpiry };
+        const signed = await signCreateGroupedOrders(ctx, { groupingType: 3, orders: [main, tp, sl], nonce: 0 });
+        expect(signed.txType).toBe(28);
+        const info = JSON.parse(signed.txInfo);
+        expect(info.Sig).toBeTruthy();
+        expect(info.GroupingType).toBe(3);
+        expect(Array.isArray(info.Orders)).toBe(true);
+        expect(info.Orders.length).toBe(3);
     });
 });

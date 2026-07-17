@@ -1,6 +1,6 @@
 {
   "name": "@hitesh23k/lighter-sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "TypeScript/JavaScript SDK for Lighter (zkLighter) and Robinhood-Chain Lighter — WASM-backed zk signer, REST and WebSocket clients.",
   "license": "Apache-2.0",
   "author": "hitesh23k",
